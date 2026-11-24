@@ -17,7 +17,15 @@ Arquitetura completa: ver documento de arquitetura do projeto.
 | 3b MVS + malha OpenMVS | `tdyh.recon.openmvs` | ✅ adaptador |
 | Grafo de cena | `tdyh.scenegraph` | ✅ modelo inicial |
 | API FastAPI + Celery | `tdyh.api`, `tdyh.worker` | ✅ |
-| 4–10 gsplat, segmentação, layout, CAD, IFC | — | próximas fases |
+| Escala métrica (ArUco, medida de referência) | `tdyh.scale` | ✅ |
+| 9 Layout: piso/teto, paredes, portas/janelas | `tdyh.layout` | ✅ |
+| Planta DXF + SVG 1:50 | `tdyh.exporters.plan2d` | ✅ |
+| Escala aproximada sem marcador (pé-direito/portas típicos) | `tdyh.scale` | ✅ |
+| Edição a posteriori: medidas, ajustes por elemento, restrições | `tdyh.constraints` | ✅ |
+| Criar/remover/dividir elementos | `tdyh.constraints`, API | ✅ |
+| Cômodos opcionais (nome, área, área útil, perímetro) | `tdyh.rooms` | ✅ |
+| Juntar levantamentos diferentes (portas, paredes, pontos; ajuste global) | `tdyh.building` | ✅ |
+| 4–8, 10 gsplat, segmentação, móveis, CAD, IFC | — | próximas fases |
 
 ## Uso local
 
@@ -30,7 +38,66 @@ pytest -q                                        # testes
 uvicorn tdyh.api.main:app --reload               # API em http://localhost:8000/docs
 ```
 
+Planta a partir de uma nuvem densa já existente:
+
+```bash
+# com medida conhecida (fator modelo->metros)
+tdyh plan scene_dense.ply data/sala --scale 2.0
+# com marcador ArUco 4x4 (DICT_4X4_50) impresso de 15 cm
+colmap model_converter --input_path sparse/0 --output_path sparse_txt --output_type TXT
+tdyh plan scene_dense.ply data/sala --marker 0.15 --images images --colmap-txt sparse_txt
+```
+
 Com Docker + GPU NVIDIA: `docker compose up --build`.
+
+### Edição a posteriori (API)
+
+A geometria medida nunca é alterada; a cena final é recalculada a cada mudança:
+medida → escala → ajustes por elemento → restrições. Apagar/desativar algo restaura o estado anterior.
+
+| Ação | Requisição |
+|---|---|
+| Listar elementos e medidas | `GET /projects/{id}/scene/elements` |
+| Medida que corrige a escala de tudo | `POST .../scene/constraints` `{"kind":"length","refs":["<parede>"],"value":4.20,"mode":"scale"}` |
+| Fixar medida só de um elemento | idem com `"mode":"local"` (também `opening_width/height/sill/offset`, `ceiling_height`, `distance`) |
+| Paralelismo / perpendicularidade | `{"kind":"parallel"\|"perpendicular","refs":["<a>","<b>"]}` |
+| Ângulo entre paredes / orientação | `{"kind":"angle","refs":[a,b],"value":120}` · `{"kind":"orientation","refs":[a],"value":0}` |
+| Travar uma parede | `{"kind":"fixed","refs":["<a>"]}` |
+| Editar / desativar / apagar restrição | `PATCH` / `DELETE .../scene/constraints/{cid}` |
+| Criar parede / porta / janela / objeto | `POST .../scene/entities` `{"element":{"type":"wall","start":[x,y],"end":[x,y]}}` (encaixa em cantos e paredes a 10 cm) |
+| Remover elemento (aberturas da parede saem junto) | `DELETE .../scene/entities/{eid}` — detectados: reversível com `POST .../{eid}/restore` |
+| Dividir parede (ex.: para ligar uma divisória) | `POST .../scene/entities/{eid}/split` `{"at":2.0}` — restrições e aberturas são transferidas |
+| Ligar/desligar divisão em cômodos (opcional) | `PUT .../scene/rooms` `{"enabled":true}` · listar: `GET .../scene/rooms` |
+| Separar ambiente aberto sem parede | criar `{"type":"separator","start":[x,y],"end":[x,y]}` (linha tracejada) |
+| Dar nome a um cômodo | `POST .../scene/rooms/labels` `{"point":[x,y],"name":"Cozinha"}` (o nome acompanha o cômodo após edições) |
+| Ajustar um elemento (espessura, tipo, largura…) | `PATCH .../scene/entities/{eid}` `{"thickness":0.25}` (`null` volta ao medido) |
+
+Cada resposta informa se cada restrição foi satisfeita e aponta conflitos e medidas incoerentes.
+
+### Juntar cômodos de levantamentos diferentes
+
+Cada levantamento é um projeto com planta própria (já em metros). Uma *edificação* reúne vários:
+
+1. `POST /buildings` `{"name":"Apto"}` e `POST /buildings/{id}/captures` `{"project_id":...}` para cada levantamento.
+2. `GET /buildings/{id}/suggestions` — pares de portas que provavelmente são a mesma, com pontuação,
+   motivos e aviso de **ambiguidade** (portas e cômodos parecidos encaixam de mais de um jeito).
+3. Confirme criando ligações: `POST /buildings/{id}/links` —
+   `door_match` (mesma porta), `wall_contact` (parede encostada), `collinear` (paredes na mesma linha,
+   ex.: fachada), `point_match` (mesmo ponto físico, ex.: canto ou marcador compartilhado).
+   Posição manual: `PUT /buildings/{id}/captures/{cid}/pose`.
+4. `POST /buildings/{id}/solve` — ajuste global de todas as posições (em ciclos o erro é repartido),
+   junção das paredes compartilhadas (espessura medida) e planta unificada em `GET /buildings/{id}/plan/{dxf|svg}`.
+
+A espessura da parede entre cômodos vem da profundidade do batente das portas (medida na detecção);
+sem ela, usa 15 cm e avisa. Corrija a escala de cada levantamento antes de juntar.
+
+### Marcadores de escala
+
+```bash
+tdyh markers marcadores.pdf -n 6            # 6 marcadores (IDs 0–5), 15 cm, um por página A4
+tdyh markers quarto.pdf -n 4 --start 10     # outro cômodo: IDs 10–13
+```
+Também disponível em `GET /markers.pdf?n=6&side_cm=15`. Use um ID diferente em cada parede.
 
 ### Dicas de captura
 - Movimento lento, ~70% de sobreposição entre quadros, luz uniforme.

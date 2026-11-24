@@ -15,6 +15,7 @@ dependencies = [
   "python-multipart>=0.0.9",
   "celery>=5.3",
   "redis>=5",
+  "ezdxf>=1.1",
 ]
 
 [project.optional-dependencies]
