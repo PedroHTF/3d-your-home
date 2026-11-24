@@ -1,0 +1,16 @@
+# Worker GPU: COLMAP (CUDA) + OpenMVS + pacote tdyh
+FROM colmap/colmap:latest AS colmap
+FROM openmvs/openmvs-ubuntu:latest AS openmvs
+
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-pip ffmpeg libgl1 libglib2.0-0 \
+      libboost-all-dev libceres2 libcgal-dev libopencv-dev libgoogle-glog0v5 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=colmap /usr/local/ /usr/local/
+COPY --from=openmvs /usr/local/bin/OpenMVS/ /usr/local/bin/
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN pip3 install --no-cache-dir .
+CMD ["celery", "-A", "tdyh.worker.tasks", "worker", "-Q", "gpu", "-c", "1", "--loglevel=info"]
