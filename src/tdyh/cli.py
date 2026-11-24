@@ -59,7 +59,7 @@ def main(argv: list[str] | None = None) -> None:
             s, src = est.factor, "marker"
             print(f"escala por marcador: {s:.5f} (±{est.uncertainty:.1%}, {est.samples} arestas)")
         a.project.mkdir(parents=True, exist_ok=True)
-        print(json.dumps(pipeline.make_plan(a.ply, a.project, s, src, colmap_txt=a.colmap_txt), indent=2, ensure_ascii=False))
+        print(json.dumps(pipeline.make_plan(a.ply, a.project, s, src, colmap_txt=a.colmap_txt, images_dir=a.images), indent=2, ensure_ascii=False))
         return
     if a.cmd == "run":
         rep = pipeline.run(a.src, a.project, a.recipe,

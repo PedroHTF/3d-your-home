@@ -63,6 +63,8 @@ medida → escala → ajustes por elemento → restrições. Apagar/desativar al
 | Paralelismo / perpendicularidade | `{"kind":"parallel"\|"perpendicular","refs":["<a>","<b>"]}` |
 | Ângulo entre paredes / orientação | `{"kind":"angle","refs":[a,b],"value":120}` · `{"kind":"orientation","refs":[a],"value":0}` |
 | Travar uma parede | `{"kind":"fixed","refs":["<a>"]}` |
+| Centralizar abertura na parede | `{"kind":"opening_center","refs":["<abertura>"]}` |
+| Alinhar abertura com outra (paredes paralelas) | `{"kind":"opening_align","refs":["<abertura>","<outra>"]}` (centro com centro) |
 | Editar / desativar / apagar restrição | `PATCH` / `DELETE .../scene/constraints/{cid}` |
 | Criar parede / porta / janela / objeto | `POST .../scene/entities` `{"element":{"type":"wall","start":[x,y],"end":[x,y]}}` (encaixa em cantos e paredes a 10 cm) |
 | Remover elemento (aberturas da parede saem junto) | `DELETE .../scene/entities/{eid}` — detectados: reversível com `POST .../{eid}/restore` |
@@ -74,6 +76,11 @@ medida → escala → ajustes por elemento → restrições. Apagar/desativar al
 
 Cada resposta informa se cada restrição foi satisfeita e aponta conflitos e medidas incoerentes.
 
+Elementos criados e ajustes feitos pelo usuário guardam a escala em que foram desenhados: se a
+escala mudar depois (nova medida), eles acompanham. Paredes desenhadas pelo usuário fora do contorno
+(divisórias) têm a espessura **centralizada** na linha; as medidas continuam com a face na linha e
+espessura para fora. Para forçar: `PATCH`/criação com `"alignment":"face"|"center"`.
+
 ### Juntar cômodos de levantamentos diferentes
 
 Cada levantamento é um projeto com planta própria (já em metros). Uma *edificação* reúne vários:
@@ -84,6 +91,9 @@ Cada levantamento é um projeto com planta própria (já em metros). Uma *edific
 3. Confirme criando ligações: `POST /buildings/{id}/links` —
    `door_match` (mesma porta), `wall_contact` (parede encostada), `collinear` (paredes na mesma linha,
    ex.: fachada), `point_match` (mesmo ponto físico, ex.: canto ou marcador compartilhado).
+   **Marcadores ArUco** com o mesmo ID vistos em dois levantamentos (ex.: colado no batente da porta)
+   viram ligações `point_match` automáticas no `solve`; dois marcadores bastam para posicionar sem
+   nenhuma ligação manual. Apagar uma ligação automática fica lembrado.
    Posição manual: `PUT /buildings/{id}/captures/{cid}/pose`.
 4. `POST /buildings/{id}/solve` — ajuste global de todas as posições (em ciclos o erro é repartido),
    junção das paredes compartilhadas (espessura medida) e planta unificada em `GET /buildings/{id}/plan/{dxf|svg}`.
@@ -121,8 +131,7 @@ Também disponível em `GET /markers.pdf?n=6&side_cm=15`. Use um ID diferente em
 
 ## Licenças
 
-Código deste repositório: **AGPL-3.0-or-later** (adicione o texto completo em `LICENSE` pelo GitHub:
-*Add file → Create new file → LICENSE → Choose a license template*).
+Código deste repositório: **AGPL-3.0-or-later** (texto completo em `LICENSE`).
 
 Dependências externas, instaladas à parte e **não** incluídas aqui:
 - OpenMVS, Ultralytics YOLO — AGPL-3.0.

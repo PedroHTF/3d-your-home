@@ -40,26 +40,66 @@ def _l_corner(w: Wall, end: str, walls: list[Wall] | None, tol: float = 0.03) ->
     return o.thickness if cosang < 0.95 else 0.0
 
 
-def _wall_polygon(w: Wall, center: np.ndarray | None = None, walls: list[Wall] | None = None) -> np.ndarray:
-    """Face interna = linha medida; espessura para fora do cômodo; pontas estendidas nos cantos em L."""
+def _on_boundary(q, poly, tol: float = 0.03) -> bool:
+    P = np.asarray(poly, float)
+    for i in range(len(P)):
+        a, b = P[i], P[(i + 1) % len(P)]
+        d = b - a
+        t = np.clip((q - a) @ d / (d @ d), 0, 1) if d @ d > 0 else 0.0
+        if np.linalg.norm(q - (a + t * d)) < tol:
+            return True
+    return False
+
+
+def is_axis(w: Wall, sg: SceneGraph) -> bool:
+    """A linha da parede é o eixo (espessura centralizada)?"""
+    if w.alignment != "auto":
+        return w.alignment == "center"
+    if w.source != "user":
+        return False
+    floors = [s.polygon for s in sg.entities if isinstance(s, Slab) and s.role == "floor"]
+    if not floors:
+        return False
+    mid = (np.array(w.start, float) + np.array(w.end, float)) / 2
+    return not any(_on_boundary(mid, f) for f in floors)
+
+
+def axis_flags(sg: SceneGraph) -> dict[str, bool]:
+    return {e.id: is_axis(e, sg) for e in sg.entities if isinstance(e, Wall)}
+
+
+def wall_band(w: Wall, center: np.ndarray | None, axis: bool = False):
+    """(normal unitária para fora, deslocamento da face 1, da face 2) em relação à linha da parede."""
     a, b = np.array(w.start), np.array(w.end)
     d = (b - a) / np.linalg.norm(b - a)
-    n = (_outward(w, center) if center is not None else np.array([-d[1], d[0]])) * w.thickness
+    nu = _outward(w, center) if center is not None else np.array([-d[1], d[0]])
+    return (nu, -w.thickness / 2, w.thickness / 2) if axis else (nu, 0.0, w.thickness)
+
+
+def _wall_polygon(w: Wall, center: np.ndarray | None = None, walls: list[Wall] | None = None,
+                  axis: bool = False) -> np.ndarray:
+    """Face interna = linha medida, espessura para fora do cômodo (ou centralizada se a linha é o
+    eixo); pontas estendidas nos cantos em L."""
+    a, b = np.array(w.start), np.array(w.end)
+    d = (b - a) / np.linalg.norm(b - a)
+    nu, lo, hi = wall_band(w, center, axis)
     a, b = a - d * _l_corner(w, "start", walls), b + d * _l_corner(w, "end", walls)
-    return np.array([a, b, b + n, a + n])
+    return np.array([a + nu * lo, b + nu * lo, b + nu * hi, a + nu * hi])
 
 
-def _opening_geom(o: Opening, w: Wall, center: np.ndarray):
+def _opening_geom(o: Opening, w: Wall, center: np.ndarray, axis: bool = False):
     a, b = np.array(w.start), np.array(w.end)
     d = (b - a) / np.linalg.norm(b - a)
-    n = _outward(w, center) * w.thickness
-    p0, p1 = a + d * o.offset, a + d * (o.offset + o.width)
+    nu, lo, hi = wall_band(w, center, axis)
+    n = nu * (hi - lo)
+    p0, p1 = a + d * o.offset + nu * lo, a + d * (o.offset + o.width) + nu * lo
     return p0, p1, n, d
 
 
 def _bounds(sg: SceneGraph) -> tuple[np.ndarray, np.ndarray]:
     c = _center(sg)
-    pts = [p for w in sg.entities if isinstance(w, Wall) for p in _wall_polygon(w, c)]
+    ax = axis_flags(sg)
+    pts = [p for w in sg.entities if isinstance(w, Wall) for p in _wall_polygon(w, c, axis=ax[w.id])]
     pts += [p for s in sg.entities if isinstance(s, Slab) for p in s.polygon]
     arr = np.array(pts) if pts else np.zeros((1, 2))
     return arr.min(axis=0), arr.max(axis=0)
@@ -81,8 +121,9 @@ def to_dxf(sg: SceneGraph, path: Path) -> Path:
     msp = doc.modelspace()
     walls = {e.id: e for e in sg.entities if isinstance(e, Wall)}
     center = _center(sg)
+    ax = axis_flags(sg)
     for w in walls.values():
-        poly = _wall_polygon(w, center, list(walls.values()))
+        poly = _wall_polygon(w, center, list(walls.values()), axis=ax[w.id])
         msp.add_lwpolyline([tuple(p) for p in poly], close=True, dxfattribs={"layer": "PAREDES"})
         hatch = msp.add_hatch(color=7, dxfattribs={"layer": "PAREDES"})
         hatch.paths.add_polyline_path([tuple(p) for p in poly], is_closed=True)
@@ -115,7 +156,7 @@ def to_dxf(sg: SceneGraph, path: Path) -> Path:
             msp.add_line(sep.start, sep.end, dxfattribs={"layer": "SEPARADORES", "linetype": "DASHED"})
     for o in sg.entities:
         if isinstance(o, Opening) and o.host_wall in walls:
-            p0, p1, n, d = _opening_geom(o, walls[o.host_wall], center)
+            p0, p1, n, d = _opening_geom(o, walls[o.host_wall], center, ax[o.host_wall])
             msp.add_lwpolyline([tuple(p0), tuple(p1), tuple(p1 + n), tuple(p0 + n)], close=True,
                                dxfattribs={"layer": "ABERTURAS"})
             if o.duplicate_of:
@@ -185,12 +226,13 @@ def to_svg(sg: SceneGraph, path: Path, scale: int = 50, margin_mm: float = 20) -
                        f'stroke-dasharray="2,1.2"/>')
     center = _center(sg)
     walls = {e.id: e for e in sg.entities if isinstance(e, Wall)}
+    ax = axis_flags(sg)
     for w in walls.values():
-        pts = " ".join(tx(p) for p in _wall_polygon(w, center, list(walls.values())))
+        pts = " ".join(tx(p) for p in _wall_polygon(w, center, list(walls.values()), axis=ax[w.id]))
         out.append(f'<polygon points="{pts}" fill="#222" stroke="#000" stroke-width="0.25"/>')
     for o in sg.entities:
         if isinstance(o, Opening) and o.host_wall in walls:
-            p0, p1, n, d = _opening_geom(o, walls[o.host_wall], center)
+            p0, p1, n, d = _opening_geom(o, walls[o.host_wall], center, ax[o.host_wall])
             e = n / np.linalg.norm(n) * 0.01
             gap = " ".join(tx(p) for p in (p0 - e, p1 - e, p1 + n + e, p0 + n + e))
             out.append(f'<polygon points="{gap}" fill="white"/>')
