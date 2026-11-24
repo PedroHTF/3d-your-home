@@ -125,6 +125,22 @@ tdyh markers quarto.pdf -n 4 --start 10     # outro cômodo: IDs 10–13
 ```
 Também disponível em `GET /markers.pdf?n=6&side_cm=15`. Use um ID diferente em cada parede.
 
+### Lentes e calibração (ChArUco)
+
+Cada lente do celular (0,6x, 1x, 3x) é uma câmera diferente. O pipeline agrupa as imagens por lente
+e resolução (EXIF; frames herdam o vídeo) e escolhe o modelo do COLMAP pelo campo de visão:
+`RADIAL` (normal/tele), `OPENCV` (grande-angular e ultra-wide), `OPENCV_FISHEYE` (> 130°). A focal
+inicial vem do EXIF; a distorção é autocalibrada. Para mais precisão, calibre cada lente uma vez:
+
+```bash
+tdyh charuco tabuleiro.pdf                 # A4: xadrez 7x10 de 25 mm com marcadores ArUco 5x5
+tdyh calibrate fotos_0.6x/ --square-mm 24.8   # 15–30 fotos do tabuleiro com UMA lente (ou um vídeo)
+tdyh lenses                                # perfis salvos · `tdyh lenses pasta/` mostra os grupos
+```
+API: `GET /charuco.pdf`, `POST /lenses/calibrate`, `GET /lenses`, `DELETE /lenses?key=...`.
+Com perfil, os parâmetros entram fixos no COLMAP (se todas as lentes da captura forem calibradas,
+os intrínsecos não são refinados). Use fotos ORIGINAIS: apps de mensagem e uploads removem o EXIF.
+
 ### Dicas de captura
 - Movimento lento, ~70% de sobreposição entre quadros, luz uniforme.
 - Para escala métrica, inclua um objeto de medida conhecida (ou um marcador ArUco impresso).

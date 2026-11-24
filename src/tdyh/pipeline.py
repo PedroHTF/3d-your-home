@@ -53,7 +53,10 @@ def run(src: Path, project_dir: Path, recipe: str = "auto", progress: Progress =
         return report
 
     progress("sfm", 0.4, {})
-    sparse = colmap.run_sparse(images, project_dir / "colmap")
+    from . import lens
+    groups = lens.plan_cameras(media, images, lens.ProfileStore(lens_profiles_path()))
+    report["stages"]["cameras"] = lens.summarize(groups)
+    sparse = colmap.run_sparse(images, project_dir / "colmap", groups=groups)
     report["stages"]["sfm"] = {**asdict(sparse), "model_dir": str(sparse.model_dir),
                                "registration_ratio": sparse.registration_ratio}
     if sparse.registration_ratio < 0.6:
@@ -72,6 +75,11 @@ def run(src: Path, project_dir: Path, recipe: str = "auto", progress: Progress =
     progress("done", 1.0, {})
     _save(project_dir, report)
     return report
+
+
+def lens_profiles_path() -> Path:
+    import os
+    return Path(os.environ.get("TDYH_DATA", "data")) / "lenses.json"
 
 
 def _save(project_dir: Path, report: dict) -> None:
