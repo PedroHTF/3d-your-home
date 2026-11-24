@@ -64,7 +64,8 @@ def run(src: Path, project_dir: Path, recipe: str = "auto", progress: Progress =
         out = openmvs.run_dense(und, project_dir / "mvs")
         report["stages"]["mvs"] = {k: str(v) for k, v in out.items()}
         progress("layout", 0.85, {})
-        report["stages"]["layout"] = make_plan(out["dense"], project_dir, scale, scale_source)
+        txt = colmap.export_txt(sparse.model_dir, project_dir / "colmap" / "sparse_txt")
+        report["stages"]["layout"] = make_plan(out["dense"], project_dir, scale, scale_source, colmap_txt=txt)
     progress("done", 1.0, {})
     _save(project_dir, report)
     return report
@@ -75,10 +76,19 @@ def _save(project_dir: Path, report: dict) -> None:
 
 
 def make_plan(dense_ply: Path, project_dir: Path, scale: float = 1.0, scale_source: str = "unknown",
-              up_hint=None) -> dict:
-    """Nuvem densa -> grafo de cena (paredes, aberturas, lajes) -> scene.json + DXF + SVG."""
+              up_hint=None, colmap_txt: Path | None = None) -> dict:
+    """Nuvem densa -> grafo de cena (paredes, aberturas, lajes) -> scene.json + DXF + SVG.
+
+    colmap_txt: modelo COLMAP em TXT; fornece as câmeras (necessárias para portas/janelas)
+    e a direção vertical."""
+    from . import scale as sc
     pts = read_ply_xyz(Path(dense_ply))
-    res = layout_mod.build_layout(pts, scale=scale, up_hint=up_hint)
+    cams = None
+    if colmap_txt:
+        poses = sc.read_colmap_text(Path(colmap_txt))
+        cams = sc.camera_centers(poses)
+        up_hint = up_hint if up_hint is not None else sc.camera_up_hint(poses)
+    res = layout_mod.build_layout(pts, scale=scale, up_hint=up_hint, cameras=cams)
     res.scene.scale_source = scale_source
     if scale_source == "unknown":
         res.notes.append("Sem referência de escala: medidas relativas. Informe uma medida ou use marcador ArUco.")
@@ -87,6 +97,7 @@ def make_plan(dense_ply: Path, project_dir: Path, scale: float = 1.0, scale_sour
     dxf = plan2d.to_dxf(res.scene, plan_dir / "planta.dxf")
     svg = plan2d.to_svg(res.scene, plan_dir / "planta.svg")
     return {"walls": sum(e.type == "wall" for e in res.scene.entities),
-            "openings": sum(e.type == "opening" for e in res.scene.entities),
+            "openings": [{"kind": e.kind.value, "width": e.width, "height": e.height, "sill": e.sill,
+                          "confidence": e.confidence} for e in res.scene.entities if e.type == "opening"],
             "height_m": round(res.ceiling_z - res.floor_z, 3),
             "dxf": str(dxf), "svg": str(svg), "notes": res.notes}

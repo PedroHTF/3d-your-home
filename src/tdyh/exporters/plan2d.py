@@ -91,6 +91,9 @@ def to_dxf(sg: SceneGraph, path: Path) -> Path:
                                dxfattribs={"layer": "ABERTURAS"})
             if o.kind.value == "door":
                 inward = -n / np.linalg.norm(n)
+                if o.source == "inferred":
+                    msp.add_text("PORTA?", height=0.1, dxfattribs={"layer": "ABERTURAS"}).set_placement(
+                        tuple((p0 + p1) / 2 + inward * 0.2), align=TextEntityAlignment.MIDDLE_CENTER)
                 a0 = np.degrees(np.arctan2(d[1], d[0]))
                 a1 = np.degrees(np.arctan2(inward[1], inward[0]))
                 cross = d[0] * inward[1] - d[1] * inward[0]
@@ -148,7 +151,8 @@ def to_svg(sg: SceneGraph, path: Path, scale: int = 50, margin_mm: float = 20) -
                 cross = d[0] * inward[1] - d[1] * inward[0]
                 sweep = 1 if cross > 0 else 0  # Y do SVG é invertido: CCW no mundo = horário na tela
                 out.append(f'<path d="M {tx(p0)} L {tx(tip)} A {r:.2f} {r:.2f} 0 0 {sweep} {tx(arc_end)}" '
-                           f'fill="none" stroke="#2a7" stroke-width="0.3"/>')
+                           f'fill="none" stroke="#2a7" stroke-width="0.3"'
+                           + (' stroke-dasharray="1.5,1"' if o.source == "inferred" else "") + '/>')
             else:
                 m0, m1 = p0 + n / 2, p1 + n / 2
                 out.append(f'<polyline points="{tx(m0)} {tx(m1)}" stroke="#27a" stroke-width="0.4"/>')

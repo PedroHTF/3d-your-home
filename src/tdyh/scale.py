@@ -113,6 +113,10 @@ def read_colmap_text(model_dir: Path) -> dict[str, dict]:
     return out
 
 
+def camera_centers(poses: dict[str, dict]) -> np.ndarray:
+    return np.array([-(p["R"].T @ p["t"]) for p in poses.values()])
+
+
 def camera_up_hint(poses: dict[str, dict]) -> np.ndarray:
     """Direção 'para cima' do mundo = média de -Y das câmeras (celular segurado em pé ou deitado
     aponta Y para baixo na imagem em qualquer caso de foto 'normal')."""

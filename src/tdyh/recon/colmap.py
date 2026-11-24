@@ -94,3 +94,11 @@ def undistort(images: Path, model: Path, out: Path) -> Path:
     _run(["colmap", "image_undistorter", "--image_path", str(images), "--input_path", str(model),
           "--output_path", str(out), "--output_type", "COLMAP"], out.parent / "colmap.log")
     return out
+
+
+def export_txt(model: Path, out: Path) -> Path:
+    """Converte o modelo binário para TXT (usado para poses/câmeras)."""
+    out.mkdir(parents=True, exist_ok=True)
+    _run(["colmap", "model_converter", "--input_path", str(model), "--output_path", str(out),
+          "--output_type", "TXT"], out.parent / "colmap.log")
+    return out

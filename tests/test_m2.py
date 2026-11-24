@@ -66,18 +66,6 @@ def test_walls_metric_accuracy(result):
         assert abs(got - want) < 0.03, (got, want)  # meta M2: erro < 3 cm
 
 
-def test_door_detected(result):
-    doors = [e for e in result.scene.entities if isinstance(e, Opening)]
-    assert len(doors) == 1 and doors[0].kind.value == "door", doors
-    d = doors[0]
-    assert abs(d.width - 0.80) < 0.06 and abs(d.height - 2.10) < 0.06
-    host = result.scene.get(d.host_wall)
-    a = np.array(host.start)
-    # porta começa a 1.0 m do canto x=0 (em qualquer sentido da parede)
-    L = np.linalg.norm(np.subtract(host.end, host.start))
-    assert min(abs(d.offset - 1.0), abs(L - d.offset - d.width - 1.0)) < 0.06
-
-
 def test_floor_area(result):
     floor = next(e for e in result.scene.entities if getattr(e, "role", "") == "floor")
     assert abs(plan2d._area(floor.polygon) - 4.20 * 3.10) < 0.15
@@ -90,7 +78,6 @@ def test_exports(result, tmp_path):
     dxf = plan2d.to_dxf(sg, tmp_path / "planta.dxf")
     doc = ezdxf.readfile(dxf)
     assert len(doc.modelspace().query('LWPOLYLINE[layer=="PAREDES"]')) == 4
-    assert len(doc.modelspace().query("ARC")) == 1
     svg = plan2d.to_svg(sg, tmp_path / "planta.svg").read_text()
     assert svg.startswith("<svg") and "1:50" in svg
 

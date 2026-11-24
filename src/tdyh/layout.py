@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .pointcloud import fit_plane_ransac, rotation_to_z, voxel_downsample
-from .scenegraph import Opening, OpeningKind, SceneGraph, Slab, Wall
+from . import openings as op
+from .scenegraph import SceneGraph, Slab, Wall
 
 
 @dataclass
@@ -33,9 +34,10 @@ class Segment:
 @dataclass
 class LayoutResult:
     scene: SceneGraph
-    floor_z: float
+    floor_z: float                  # sempre 0 no sistema da planta
+    floor_offset: float             # p_planta = R @ (s * p) - [0, 0, floor_offset]
     ceiling_z: float
-    rotation: np.ndarray            # aplica-se após a escala: p_planta = R @ (s * p) - [0,0,floor_z]
+    rotation: np.ndarray
     segments: list[Segment] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
@@ -181,10 +183,21 @@ def join_corners(segs: list[Segment], reach: float = 0.4, min_angle_deg: float =
 
 
 def build_layout(pts: np.ndarray, scale: float = 1.0, up_hint: np.ndarray | None = None,
-                 wall_thickness: float = 0.15) -> LayoutResult:
+                 wall_thickness: float = 0.15, cameras: np.ndarray | None = None,
+                 vis_pairs: np.ndarray | None = None) -> LayoutResult:
+    """cameras: centros das câmeras (M x 3, mesmo sistema de pts antes da escala).
+    vis_pairs: pares (índice do ponto, índice da câmera) de quem viu cada ponto (OpenMVS/COLMAP).
+    Sem câmeras não há como separar vão de região não filmada: aberturas não são detectadas."""
     pts = np.asarray(pts, float) * scale
     R, rot = align_to_gravity(pts, up_hint)
     floor_z, ceil_z = floor_ceiling(rot[:, 2])
+    floor_off = floor_z
+    rot[:, 2] -= floor_z
+    cams = None
+    if cameras is not None:
+        cams = (np.asarray(cameras, float) * scale) @ R.T
+        cams[:, 2] -= floor_z
+    ceil_z, floor_z = ceil_z - floor_z, 0.0
     height = ceil_z - floor_z
     notes = []
     if not 2.0 <= height <= 5.0:
@@ -194,68 +207,90 @@ def build_layout(pts: np.ndarray, scale: float = 1.0, up_hint: np.ndarray | None
     xy = voxel_downsample(rot[band][:, :2], 0.01)
     segs = extract_segments(xy)
     segs = join_corners(merge_collinear(snap_manhattan(segs)))
+    segs = [sg_ for sg_ in segs if reaches_ceiling(sg_, rot, ceil_z)]
+    inner = cams[:, :2].mean(axis=0) if cams is not None else np.median(
+        rot[np.abs(rot[:, 2]) < 0.03][:, :2], axis=0)
+    segs = join_corners(enclosing_only(segs, inner))
     sg = SceneGraph(scale_source="unknown")
     for s in segs:
         sg.entities.append(Wall(start=tuple(map(float, s.p0)), end=tuple(map(float, s.p1)),
                                 thickness=wall_thickness, height=round(height, 3),
                                 confidence=min(1.0, s.support / 1500)))
-    for w in [e for e in sg.entities if isinstance(e, Wall)]:
-        sg.entities.extend(detect_openings(w, rot, floor_z, height))
-    flat = rot[np.abs(rot[:, 2] - floor_z) < 0.03][:, :2]
-    if len(flat) >= 3:
-        poly = _hull(flat)
+    walls = [e for e in sg.entities if isinstance(e, Wall)]
+    center = np.mean([np.r_[w.start] for w in walls] + [np.r_[w.end] for w in walls], axis=0) if walls else np.zeros(2)
+    if cams is None:
+        notes.append("Sem poses de câmera: portas e janelas não detectadas (não dá para separar vão de área não filmada).")
+    else:
+        occl = op.Occluders(voxel_downsample(rot, 0.04))
+        for w in walls:
+            g = op.build_grid(w, rot, height, center, cams, vis_pairs, occl)
+            found, wn = op.openings_from_grid(w, g)
+            sg.entities.extend(found)
+            notes.extend(wn)
+    poly = room_polygon(segs, inner)
+    if poly is None:  # paredes não fecham: usa pontos do piso perto do interior
+        flat = rot[(np.abs(rot[:, 2]) < 0.03) & (np.linalg.norm(rot[:, :2] - inner, axis=1) < 6)][:, :2]
+        poly = _hull(flat) if len(flat) >= 3 else None
+        notes.append("Paredes não formam contorno fechado: piso estimado pelos pontos (pode incluir áreas vizinhas).")
+    if poly:
         sg.entities.append(Slab(polygon=poly, elevation=0.0, role="floor"))
         sg.entities.append(Slab(polygon=poly, elevation=round(height, 3), role="ceiling"))
     notes.append("Espessura de parede é padrão (inferida); eixo das paredes = face interna medida.")
-    return LayoutResult(sg, floor_z, ceil_z, R, segs, notes)
+    return LayoutResult(sg, floor_z, floor_off, ceil_z, R, segs, notes)
 
 
-def detect_openings(w: Wall, rot: np.ndarray, floor_z: float, height: float,
-                    near: float = 0.05, cell: float = 0.05, min_width: float = 0.5) -> list[Opening]:
-    """Vãos numa parede: grade (posição ao longo da parede x altura) de ocupação.
+def enclosing_only(segs: list[Segment], inner: np.ndarray) -> list[Segment]:
+    """Remove superfícies vistas ATRÁS de outra parede (corredor pela porta, prédio pela janela):
+    descarta o segmento se a linha do interior até ele cruzar outro segmento antes."""
+    def crosses(p, q, s):
+        d1, d2 = q - p, s.p1 - s.p0
+        den = d1[0] * d2[1] - d1[1] * d2[0]
+        if abs(den) < 1e-12:
+            return False
+        w = s.p0 - p
+        u = (w[0] * d2[1] - w[1] * d2[0]) / den
+        v = (w[0] * d1[1] - w[1] * d1[0]) / den
+        return 0 < u < 0.97 and -0.02 <= v <= 1.02
 
-    Colunas vazias na faixa 0.4–1.6 m = abertura. Vazio até o piso = porta; senão janela.
-    """
-    a, b = np.array(w.start), np.array(w.end)
-    L = float(np.linalg.norm(b - a))
-    d = (b - a) / L
-    nrm = np.array([-d[1], d[0]])
-    rel = rot[:, :2] - a
-    on = (np.abs(rel @ nrm) < near)
-    t, z = rel[on] @ d, rot[on, 2] - floor_z
-    keep = (t > 0) & (t < L)
-    t, z = t[keep], z[keep]
-    nt, nz = int(L / cell), int(height / cell)
-    if nt < 3 or nz < 3:
-        return []
-    occ, _, _ = np.histogram2d(t, z, bins=[nt, nz], range=[[0, L], [0, height]])
-    occ = occ > 0
-    zc = (np.arange(nz) + 0.5) * cell
-    mid = (zc > 0.4) & (zc < 1.6)
-    empty_col = occ[:, mid].mean(axis=1) < 0.2
-    out = []
-    i = 0
-    while i < nt:
-        if not empty_col[i]:
-            i += 1
-            continue
-        j = i
-        while j + 1 < nt and empty_col[j + 1]:
-            j += 1
-        width = (j - i + 1) * cell
-        # ignora vãos encostados nas extremidades (são cantos/encontros, não aberturas)
-        if width >= min_width and i > 1 and j < nt - 2:
-            rows = occ[i : j + 1].mean(axis=0) < 0.2
-            empty_z = zc[rows]
-            top = float(empty_z.max() + cell / 2) if len(empty_z) else 2.1
-            bottom = float(empty_z.min() - cell / 2) if len(empty_z) else 0.0
-            is_door = bottom < 0.15
-            out.append(Opening(kind=OpeningKind.door if is_door else OpeningKind.window,
-                               host_wall=w.id, offset=round(i * cell, 3), width=round(width, 3),
-                               height=round(top - (0 if is_door else bottom), 3),
-                               sill=0.0 if is_door else round(bottom, 3), confidence=0.7))
-        i = j + 1
-    return out
+    keep = []
+    for s in segs:
+        probes = [s.p0 + f * (s.p1 - s.p0) for f in (0.25, 0.5, 0.75)]
+        hidden = sum(any(crosses(inner, q, o) for o in segs if o is not s) for q in probes)
+        if hidden < 2:
+            keep.append(s)
+    return keep
+
+
+def reaches_ceiling(seg: Segment, rot: np.ndarray, ceil_z: float, near: float = 0.04,
+                    top_band: float = 0.35, bin_m: float = 0.1, min_cov: float = 0.5) -> bool:
+    """Parede de verdade vai até o teto; frente de armário/estante não."""
+    d = seg.direction
+    nvec = np.array([-d[1], d[0]])
+    rel = rot[:, :2] - seg.p0
+    m = (np.abs(rel @ nvec) < near) & (rot[:, 2] > ceil_z - top_band) & (rot[:, 2] < ceil_z - 0.03)
+    t = rel[m] @ d
+    nb = max(1, int(seg.length / bin_m))
+    hist, _ = np.histogram(t, bins=nb, range=(0, seg.length))
+    return (hist > 0).mean() >= min_cov
+
+
+def room_polygon(segs: list[Segment], inner: np.ndarray, snap: float = 0.03):
+    """Contorno do cômodo a partir dos cantos das paredes (ordenados pelo ângulo em torno do interior).
+    Vale para cômodos 'estrelados' a partir do interior (retangulares, em L, a maioria dos reais)."""
+    if len(segs) < 3:
+        return None
+    pts = []
+    for s in segs:
+        for q in (s.p0, s.p1):
+            if not any(np.linalg.norm(q - r) < snap for r in pts):
+                pts.append(q)
+    # cada canto deve ser compartilhado por 2 paredes; senão o contorno não fecha
+    shared = [q for q in pts if sum(min(np.linalg.norm(q - s.p0), np.linalg.norm(q - s.p1)) < snap
+                                    for s in segs) >= 2]
+    if len(shared) != len(pts) or len(pts) < 3:
+        return None
+    ang = [np.arctan2(*(q - inner)[::-1]) for q in pts]
+    return [tuple(map(float, pts[i])) for i in np.argsort(ang)]
 
 
 def _cross2(a, b) -> float:

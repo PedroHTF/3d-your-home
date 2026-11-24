@@ -28,15 +28,13 @@ def main(argv: list[str] | None = None) -> None:
     a = ap.parse_args(argv)
     if a.cmd == "plan":
         from . import scale as sc
-        s, src, up = a.scale or 1.0, "user_measure" if a.scale else "unknown", None
-        if a.colmap_txt:
-            up = sc.camera_up_hint(sc.read_colmap_text(a.colmap_txt))
+        s, src = a.scale or 1.0, "user_measure" if a.scale else "unknown"
         if a.marker:
             est = sc.scale_from_images(a.images, a.colmap_txt, a.marker)
             s, src = est.factor, "marker"
             print(f"escala por marcador: {s:.5f} (±{est.uncertainty:.1%}, {est.samples} arestas)")
         a.project.mkdir(parents=True, exist_ok=True)
-        print(json.dumps(pipeline.make_plan(a.ply, a.project, s, src, up), indent=2, ensure_ascii=False))
+        print(json.dumps(pipeline.make_plan(a.ply, a.project, s, src, colmap_txt=a.colmap_txt), indent=2, ensure_ascii=False))
         return
     if a.cmd == "run":
         rep = pipeline.run(a.src, a.project, a.recipe,
