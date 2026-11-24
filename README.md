@@ -61,6 +61,9 @@ medida → escala → ajustes por elemento → restrições. Apagar/desativar al
 | Ângulo entre paredes / orientação | `{"kind":"angle","refs":[a,b],"value":120}` · `{"kind":"orientation","refs":[a],"value":0}` |
 | Travar uma parede | `{"kind":"fixed","refs":["<a>"]}` |
 | Editar / desativar / apagar restrição | `PATCH` / `DELETE .../scene/constraints/{cid}` |
+| Criar parede / porta / janela / objeto | `POST .../scene/entities` `{"element":{"type":"wall","start":[x,y],"end":[x,y]}}` (encaixa em cantos e paredes a 10 cm) |
+| Remover elemento (aberturas da parede saem junto) | `DELETE .../scene/entities/{eid}` — detectados: reversível com `POST .../{eid}/restore` |
+| Dividir parede (ex.: para ligar uma divisória) | `POST .../scene/entities/{eid}/split` `{"at":2.0}` — restrições e aberturas são transferidas |
 | Ajustar um elemento (espessura, tipo, largura…) | `PATCH .../scene/entities/{eid}` `{"thickness":0.25}` (`null` volta ao medido) |
 
 Cada resposta informa se cada restrição foi satisfeita e aponta conflitos e medidas incoerentes.

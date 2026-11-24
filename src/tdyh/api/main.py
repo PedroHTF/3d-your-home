@@ -249,6 +249,84 @@ def edit_entity(pid: str, eid: str, params: dict) -> dict:
     return _save_and_publish(pid, sg)
 
 
+class NewElement(BaseModel):
+    element: dict          # {"type":"wall","start":[x,y],"end":[x,y],...} | {"type":"opening",...} | {"type":"box",...}
+    snap: bool = True      # encaixa extremidades de paredes em cantos/paredes existentes (10 cm)
+
+
+@app.post("/projects/{pid}/scene/entities", status_code=201)
+def create_entity(pid: str, body: NewElement) -> dict:
+    """Cria parede, abertura (porta/janela) ou objeto. Coordenadas em metros, no sistema da planta."""
+    from pydantic import TypeAdapter, ValidationError
+
+    from ..constraints import snap_point
+    from ..scenegraph import AnyEntity, Opening, Wall
+    from typing import Annotated
+    from pydantic import Field as F
+    try:
+        e = TypeAdapter(Annotated[AnyEntity, F(discriminator="type")]).validate_python(
+            {**body.element, "source": "user"})
+    except ValidationError as err:
+        raise HTTPException(422, err.errors(include_url=False))
+    final = get_scene(pid)
+    sg = _load_measured(pid)
+    info = {}
+    if isinstance(e, Wall):
+        if body.snap:
+            e.start, info["start"] = snap_point(final, e.start)
+            e.end, info["end"] = snap_point(final, e.end)
+        import numpy as np
+        if np.linalg.norm(np.subtract(e.end, e.start)) < 0.05:
+            raise HTTPException(422, "parede com menos de 5 cm")
+    if isinstance(e, Opening) and not isinstance(final.get(e.host_wall), Wall) and \
+            not any(a.id == e.host_wall for a in sg.added):
+        raise HTTPException(422, f"parede {e.host_wall} não existe")
+    sg.added.append(e)
+    return {"created": e.id, "snapped": info, **_save_and_publish(pid, sg)}
+
+
+@app.delete("/projects/{pid}/scene/entities/{eid}")
+def delete_entity(pid: str, eid: str) -> dict:
+    """Remove um elemento. Aberturas da parede removida saem junto. Reversível com /restore
+    (elementos detectados); elementos criados pelo usuário são apagados de vez."""
+    sg = _load_measured(pid)
+    if any(a.id == eid for a in sg.added):
+        sg.added = [a for a in sg.added if a.id != eid and getattr(a, "host_wall", None) != eid]
+    elif any(e.id == eid for e in sg.entities):
+        if eid not in sg.deleted:
+            sg.deleted.append(eid)
+    else:
+        raise HTTPException(404, "elemento não encontrado")
+    return _save_and_publish(pid, sg)
+
+
+@app.post("/projects/{pid}/scene/entities/{eid}/restore")
+def restore_entity(pid: str, eid: str) -> dict:
+    sg = _load_measured(pid)
+    if eid not in sg.deleted:
+        raise HTTPException(404, "elemento não está removido")
+    sg.deleted.remove(eid)
+    return _save_and_publish(pid, sg)
+
+
+class SplitIn(BaseModel):
+    at: float  # metros a partir do início da parede
+
+
+@app.post("/projects/{pid}/scene/entities/{eid}/split")
+def split_entity(pid: str, eid: str, body: SplitIn) -> dict:
+    """Divide uma parede em duas (ex.: para ligar uma parede interna nesse ponto)."""
+    from ..constraints import split_wall
+    sg, final = _load_measured(pid), get_scene(pid)
+    if final.get(eid) is None or final.get(eid).type != "wall":
+        raise HTTPException(404, "parede não encontrada")
+    try:
+        ids = split_wall(sg, final, eid, body.at)
+    except ValueError as err:
+        raise HTTPException(422, str(err))
+    return {"created": list(ids), **_save_and_publish(pid, sg)}
+
+
 @app.get("/projects/{pid}/plan/{fmt}")
 def get_plan(pid: str, fmt: Literal["dxf", "svg"]):
     p = _pdir(pid) / "work" / "plan" / f"planta.{fmt}"

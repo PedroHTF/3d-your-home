@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -131,6 +131,9 @@ class SceneGraph(BaseModel):
     relations: list[Relation] = Field(default_factory=list)
     constraints: list[Constraint] = Field(default_factory=list)
     overrides: dict[str, dict] = Field(default_factory=dict)  # ajustes manuais por elemento
+    added: list[Annotated[AnyEntity, Field(discriminator="type")]] = Field(default_factory=list)  # criados pelo usuário
+    deleted: list[str] = Field(default_factory=list)          # ids removidos (reversível)
 
     def get(self, eid: str) -> AnyEntity | None:
-        return next((e for e in self.entities if e.id == eid), None)
+        return next((e for e in self.entities if e.id == eid), None) or \
+            next((e for e in self.added if e.id == eid), None)

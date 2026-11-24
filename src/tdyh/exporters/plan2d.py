@@ -24,12 +24,28 @@ def _outward(w: Wall, center: np.ndarray) -> np.ndarray:
     return n if (((a + b) / 2 - center) @ n) > 0 else -n
 
 
-def _wall_polygon(w: Wall, center: np.ndarray | None = None) -> np.ndarray:
-    """Face interna = linha medida; espessura para fora do cômodo; pontas estendidas para fechar cantos."""
+def _l_corner(w: Wall, end: str, walls: list[Wall] | None, tol: float = 0.03) -> float:
+    """Espessura a estender na ponta: só em canto em L (exatamente 1 outra parede, não colinear).
+    Em T, em divisões colineares ou em ponta solta não se estende (senão atravessa a parede)."""
+    if walls is None:
+        return w.thickness
+    q = np.array(getattr(w, end))
+    others = [o for o in walls if o is not w and
+              min(np.linalg.norm(q - np.array(o.start)), np.linalg.norm(q - np.array(o.end))) < tol]
+    if len(others) != 1:
+        return 0.0
+    o = others[0]
+    d1 = np.subtract(w.end, w.start); d2 = np.subtract(o.end, o.start)
+    cosang = abs(d1 @ d2) / (np.linalg.norm(d1) * np.linalg.norm(d2))
+    return o.thickness if cosang < 0.95 else 0.0
+
+
+def _wall_polygon(w: Wall, center: np.ndarray | None = None, walls: list[Wall] | None = None) -> np.ndarray:
+    """Face interna = linha medida; espessura para fora do cômodo; pontas estendidas nos cantos em L."""
     a, b = np.array(w.start), np.array(w.end)
     d = (b - a) / np.linalg.norm(b - a)
     n = (_outward(w, center) if center is not None else np.array([-d[1], d[0]])) * w.thickness
-    a, b = a - d * w.thickness, b + d * w.thickness
+    a, b = a - d * _l_corner(w, "start", walls), b + d * _l_corner(w, "end", walls)
     return np.array([a, b, b + n, a + n])
 
 
@@ -65,7 +81,7 @@ def to_dxf(sg: SceneGraph, path: Path) -> Path:
     walls = {e.id: e for e in sg.entities if isinstance(e, Wall)}
     center = _center(sg)
     for w in walls.values():
-        poly = _wall_polygon(w, center)
+        poly = _wall_polygon(w, center, list(walls.values()))
         msp.add_lwpolyline([tuple(p) for p in poly], close=True, dxfattribs={"layer": "PAREDES"})
         hatch = msp.add_hatch(color=7, dxfattribs={"layer": "PAREDES"})
         hatch.paths.add_polyline_path([tuple(p) for p in poly], is_closed=True)
@@ -136,7 +152,7 @@ def to_svg(sg: SceneGraph, path: Path, scale: int = 50, margin_mm: float = 20) -
     center = _center(sg)
     walls = {e.id: e for e in sg.entities if isinstance(e, Wall)}
     for w in walls.values():
-        pts = " ".join(tx(p) for p in _wall_polygon(w, center))
+        pts = " ".join(tx(p) for p in _wall_polygon(w, center, list(walls.values())))
         out.append(f'<polygon points="{pts}" fill="#222" stroke="#000" stroke-width="0.25"/>')
     for o in sg.entities:
         if isinstance(o, Opening) and o.host_wall in walls:

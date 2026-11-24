@@ -155,6 +155,25 @@ def apply_overrides(sg: SceneGraph) -> list[str]:
 
 # ---------------------------------------------------------------- resolvedor geométrico
 
+def _t_junctions(walls: list[Wall], idx: dict, P0: np.ndarray, tol: float = 0.03):
+    """Extremidade de uma parede encostada no MEIO de outra (parede interna em T):
+    vira restrição implícita 'ponto sobre a linha' para não se soltar ao resolver."""
+    out = []
+    for w in walls:
+        for end in ("start", "end"):
+            q = P0[idx[(w.id, end)]]
+            for h in walls:
+                if h is w:
+                    continue
+                a, b = P0[idx[(h.id, "start")]], P0[idx[(h.id, "end")]]
+                d = b - a
+                L = np.linalg.norm(d)
+                t = (q - a) @ d / L**2
+                if 0.02 < t < 0.98 and abs(np.cross(np.r_[d / L, 0], np.r_[q - a, 0])[2]) < tol:
+                    out.append((idx[(w.id, end)], h.id))
+    return out
+
+
 def _topology(walls: list[Wall], tol: float = 0.03):
     """Une extremidades coincidentes num mesmo ponto (canto)."""
     pts: list[np.ndarray] = []
@@ -181,9 +200,12 @@ def solve_geometry(sg: SceneGraph, w_constraint: float = 1e3, w_anchor: float = 
     statuses = [ConstraintStatus(c.id, c.kind, False, float("nan"), "Referência inexistente ou não é parede.")
                 for c in bad]
     cs = [c for c in cs if c not in bad]
-    if not cs or not walls:
+    if not walls:
         return statuses
     P0, idx = _topology(walls)
+    tees = _t_junctions(walls, idx, P0)
+    if not cs and not tees:
+        return statuses
     wid = {w.id: w for w in walls}
     fixed_pts = {idx[(r, e)] for c in cs if c.kind == "fixed" for r in c.refs for e in ("start", "end")}
 
@@ -217,6 +239,10 @@ def solve_geometry(sg: SceneGraph, w_constraint: float = 1e3, w_anchor: float = 
                     cur = np.degrees(np.arctan2(da[0] * db[1] - da[1] * db[0], da @ db))
                     L = (np.linalg.norm(da) + np.linalg.norm(db)) / 2
                 res.append(w_constraint * np.radians(_wrap180(cur - _target(c))) * L)
+        for pi, host in tees:
+            a, b = seg(P, host)
+            d = (b - a) / np.linalg.norm(b - a)
+            res.append(w_constraint * (d[0] * (P[pi] - a)[1] - d[1] * (P[pi] - a)[0]))
         anchor_w = np.where(np.isin(np.arange(len(P0)), list(fixed_pts)), w_constraint, w_anchor)
         res.extend((anchor_w[:, None] * (P - P0)).ravel())
         return np.array(res)
@@ -284,6 +310,125 @@ def ceiling_constraint(sg: SceneGraph) -> list[ConstraintStatus]:
     return st
 
 
+# ---------------------------------------------------------------- criar / remover
+
+def apply_structure(sg: SceneGraph) -> list[str]:
+    """Remove os apagados (e as aberturas hospedadas neles), inclui os criados e,
+    se o conjunto de paredes mudou, refaz o contorno de piso/teto a partir dos cantos."""
+    from .layout import Segment, room_polygon
+
+    warn = []
+    gone = set(sg.deleted)
+    gone |= {e.id for e in sg.entities + sg.added if isinstance(e, Opening) and e.host_wall in gone}
+    walls_changed = any(isinstance(e, Wall) for e in sg.entities if e.id in gone) or \
+        any(isinstance(e, Wall) for e in sg.added)
+    sg.entities = [e for e in sg.entities if e.id not in gone] + \
+                  [e.model_copy(deep=True) for e in sg.added if e.id not in gone]
+    sg.added, sg.deleted = [], []
+    for o in sg.entities:
+        if isinstance(o, Opening) and not isinstance(sg.get(o.host_wall), Wall):
+            warn.append(f"Abertura {o.id}: parede {o.host_wall} não existe; removida.")
+    sg.entities = [o for o in sg.entities if not (isinstance(o, Opening) and not isinstance(sg.get(o.host_wall), Wall))]
+    if walls_changed:
+        walls = [e for e in sg.entities if isinstance(e, Wall)]
+        slabs = [e for e in sg.entities if isinstance(e, Slab)]
+        inner = np.mean(slabs[0].polygon, axis=0) if slabs else \
+            np.mean([w.start for w in walls] + [w.end for w in walls], axis=0) if walls else np.zeros(2)
+        segs = [Segment(np.array(w.start, float), np.array(w.end, float), 1) for w in walls]
+        # paredes internas (pontas soltas ou em T) não participam do contorno externo
+        changed = True
+        while changed:
+            changed = False
+            for sgm in list(segs):
+                for q in (sgm.p0, sgm.p1):
+                    if not any(o is not sgm and min(np.linalg.norm(q - o.p0), np.linalg.norm(q - o.p1)) < 0.03
+                               for o in segs):
+                        segs = [x for x in segs if x is not sgm]
+                        changed = True
+                        break
+        poly = room_polygon(segs, inner)
+        if poly is None:
+            warn.append("Paredes não formam um contorno fechado: piso/teto mantidos como antes da edição.")
+        else:
+            for sl in slabs:
+                sl.polygon = poly
+    return warn
+
+
+def validate_openings(sg: SceneGraph) -> list[str]:
+    warn = []
+    for o in sg.entities:
+        if isinstance(o, Opening):
+            w = sg.get(o.host_wall)
+            L = float(np.linalg.norm(np.subtract(w.end, w.start)))
+            if o.offset < -1e-6 or o.offset + o.width > L + 1e-6 or o.sill + o.height > w.height + 1e-6:
+                warn.append(f"Abertura {o.id} não cabe na parede {w.id} ({L:.2f} m).")
+    return warn
+
+
+def snap_point(sg: SceneGraph, q, tol: float = 0.10, exclude: str | None = None):
+    """Encaixa um ponto num canto existente; senão, sobre a linha de uma parede (junção em T)."""
+    q = np.asarray(q, float)
+    walls = [e for e in sg.entities if isinstance(e, Wall) and e.id != exclude]
+    corners = [np.array(p) for w in walls for p in (w.start, w.end)]
+    if corners:
+        d = [np.linalg.norm(q - c) for c in corners]
+        i = int(np.argmin(d))
+        if d[i] < tol:
+            return tuple(map(float, corners[i])), "corner"
+    for w in walls:
+        a, b = np.array(w.start), np.array(w.end)
+        t = np.clip((q - a) @ (b - a) / ((b - a) @ (b - a)), 0, 1)
+        p = a + t * (b - a)
+        if np.linalg.norm(q - p) < tol:
+            return tuple(map(float, p)), "wall"
+    return tuple(map(float, q)), None
+
+
+def split_wall(measured: SceneGraph, final: SceneGraph, wid: str, at: float) -> tuple[str, str]:
+    """Divide a parede `wid` a `at` metros do início: apaga-a e cria duas (aberturas redistribuídas).
+    Usa a geometria FINAL (o que o usuário vê) para as novas paredes."""
+    w = final.get(wid)
+    a, b = np.array(w.start), np.array(w.end)
+    L = float(np.linalg.norm(b - a))
+    if not 0.05 < at < L - 0.05:
+        raise ValueError(f"posição deve ficar entre 0,05 e {L - 0.05:.2f} m")
+    m = a + (b - a) * at / L
+    w1 = Wall(start=tuple(a), end=tuple(m), thickness=w.thickness, height=w.height, source="user")
+    w2 = Wall(start=tuple(m), end=tuple(b), thickness=w.thickness, height=w.height, source="user")
+    measured.added += [w1, w2]
+    for o in [e for e in final.entities if isinstance(e, Opening) and e.host_wall == wid]:
+        if o.offset + o.width <= at:
+            new = o.model_copy(update={"host_wall": w1.id, "source": "user"})
+        elif o.offset >= at:
+            new = o.model_copy(update={"host_wall": w2.id, "offset": o.offset - at, "source": "user"})
+        else:
+            raise ValueError(f"o ponto de divisão corta a abertura {o.id}")
+        new.id = o.id + "s"
+        measured.added.append(new)
+    measured.deleted.append(wid)
+    # restrições da parede original passam para as metades
+    from .scenegraph import Constraint
+    angular = {"parallel", "perpendicular", "angle", "orientation", "fixed"}
+    new_cs = []
+    for c in measured.constraints:
+        if wid not in c.refs:
+            continue
+        if c.kind in angular:
+            for half in (w1.id, w2.id):
+                new_cs.append(c.model_copy(update={"id": c.id + half[-4:],
+                                                   "refs": [half if r == wid else r for r in c.refs]}))
+            c.enabled = False
+            c.note = f"substituída após dividir a parede {wid}"
+        elif c.kind in ("length", "distance") and c.mode == "local":
+            c.enabled = False
+            c.note = f"parede {wid} foi dividida; refaça a medida nas partes"
+    measured.constraints += new_cs
+    measured.constraints.append(Constraint(kind="parallel", refs=[w1.id, w2.id],
+                                           note="metades colineares (divisão de parede)"))
+    return w1.id, w2.id
+
+
 # ---------------------------------------------------------------- tudo junto
 
 def rebuild(measured: SceneGraph) -> tuple[SceneGraph, SolveReport]:
@@ -300,8 +445,10 @@ def rebuild(measured: SceneGraph) -> tuple[SceneGraph, SolveReport]:
             rep.warnings.append(f"Escala corrigida em {s - 1:+.0%}: recomendável refazer a detecção "
                                 "(POST /plan) para que portas e janelas usem limites na escala certa.")
     rep.statuses += st
+    rep.warnings += apply_structure(sg)
     rep.warnings += apply_overrides(sg)
     rep.statuses += ceiling_constraint(sg)
     rep.statuses += solve_geometry(sg)
     rep.statuses += apply_opening_constraints(sg)
+    rep.warnings += validate_openings(sg)
     return sg, rep
