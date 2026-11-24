@@ -392,6 +392,27 @@ def get_plan(pid: str, fmt: Literal["dxf", "svg"]):
     return FileResponse(p)
 
 
+def _ifc_response(sg: SceneGraph, out: Path, **names):
+    from ..exporters.ifc import to_ifc
+    try:
+        path, warn = to_ifc(sg, out, **names)
+    except RuntimeError as e:
+        raise HTTPException(501, str(e))
+    return FileResponse(path, media_type="application/x-step", filename=out.name,
+                        headers={"X-TDYH-Warnings": json.dumps(warn, ensure_ascii=True)})
+
+
+@app.get("/projects/{pid}/ifc")
+def get_ifc(pid: str):
+    """IFC4 da cena final do levantamento (gerado na hora, sempre a partir da cena atual)."""
+    sg = get_scene(pid)
+    if not sg.entities:
+        raise HTTPException(409, "levantamento ainda não tem planta")
+    name = json.loads((_pdir(pid) / "project.json").read_text()).get("name", "3D Your Home") \
+        if (_pdir(pid) / "project.json").exists() else "3D Your Home"
+    return _ifc_response(sg, _pdir(pid) / "work" / "plan" / "modelo.ifc", project_name=name, building_name=name)
+
+
 @app.get("/projects/{pid}/artifacts/{kind}")
 def get_artifact(pid: str, kind: Literal["dense", "mesh", "textured"]):
     rep = get_report(pid)
@@ -552,6 +573,17 @@ def solve_building(bid: str) -> dict:
             "shared_walls": info, "warnings": warn,
             "rooms": [{"name": e.name, "area": e.area, "net_area": e.net_area}
                       for e in merged.entities if e.type == "space"]}
+
+
+@app.get("/buildings/{bid}/ifc")
+def building_ifc(bid: str):
+    """IFC4 da planta unificada (paredes compartilhadas uma vez só, portas duplicadas uma vez só)."""
+    b = _bload(bid)
+    f = DATA / "buildings" / bid / "scene.json"
+    if not f.exists():
+        raise HTTPException(404, "planta unificada ainda não gerada (POST /solve)")
+    sg = SceneGraph.model_validate_json(f.read_text())
+    return _ifc_response(sg, DATA / "buildings" / bid / "modelo.ifc", project_name=b.name, building_name=b.name)
 
 
 @app.get("/buildings/{bid}/plan/{fmt}")

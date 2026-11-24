@@ -1,4 +1,4 @@
-"""CLI: tdyh run <pasta-ou-video> <pasta-do-projeto> [--recipe auto|classic|neural|hybrid]"""
+"""CLI: tdyh run | plan | markers | ifc"""
 
 from __future__ import annotations
 
@@ -30,7 +30,20 @@ def main(argv: list[str] | None = None) -> None:
     mk.add_argument("-n", type=int, default=6, help="quantidade (1 a 50)")
     mk.add_argument("--start", type=int, default=0, help="primeiro ID (use IDs diferentes por cômodo)")
     mk.add_argument("--side-cm", type=float, default=15.0)
+    ic = sub.add_parser("ifc", help="exporta IFC4 (BIM) de uma cena final (scene.json)")
+    ic.add_argument("scene", type=Path, help="scene.json de um levantamento ou da edificação")
+    ic.add_argument("out", type=Path, nargs="?", default=Path("modelo.ifc"))
+    ic.add_argument("--name", default="3D Your Home", help="nome do projeto/edificação no IFC")
     a = ap.parse_args(argv)
+    if a.cmd == "ifc":
+        from .exporters.ifc import to_ifc
+        from .scenegraph import SceneGraph
+        sg = SceneGraph.model_validate_json(a.scene.read_text())
+        path, warn = to_ifc(sg, a.out, project_name=a.name, building_name=a.name)
+        for w in warn:
+            print("aviso:", w)
+        print(path)
+        return
     if a.cmd == "markers":
         from . import markers
         ids = range(a.start, a.start + a.n)
