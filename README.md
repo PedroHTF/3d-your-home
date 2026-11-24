@@ -22,6 +22,8 @@ Arquitetura completa: ver documento de arquitetura do projeto.
 | Planta DXF + SVG 1:50 | `tdyh.exporters.plan2d` | ✅ |
 | Escala aproximada sem marcador (pé-direito/portas típicos) | `tdyh.scale` | ✅ |
 | Edição a posteriori: medidas, ajustes por elemento, restrições | `tdyh.constraints` | ✅ |
+| Criar/remover/dividir elementos | `tdyh.constraints`, API | ✅ |
+| Cômodos opcionais (nome, área, área útil, perímetro) | `tdyh.rooms` | ✅ |
 | 4–8, 10 gsplat, segmentação, móveis, CAD, IFC | — | próximas fases |
 
 ## Uso local
@@ -64,6 +66,9 @@ medida → escala → ajustes por elemento → restrições. Apagar/desativar al
 | Criar parede / porta / janela / objeto | `POST .../scene/entities` `{"element":{"type":"wall","start":[x,y],"end":[x,y]}}` (encaixa em cantos e paredes a 10 cm) |
 | Remover elemento (aberturas da parede saem junto) | `DELETE .../scene/entities/{eid}` — detectados: reversível com `POST .../{eid}/restore` |
 | Dividir parede (ex.: para ligar uma divisória) | `POST .../scene/entities/{eid}/split` `{"at":2.0}` — restrições e aberturas são transferidas |
+| Ligar/desligar divisão em cômodos (opcional) | `PUT .../scene/rooms` `{"enabled":true}` · listar: `GET .../scene/rooms` |
+| Separar ambiente aberto sem parede | criar `{"type":"separator","start":[x,y],"end":[x,y]}` (linha tracejada) |
+| Dar nome a um cômodo | `POST .../scene/rooms/labels` `{"point":[x,y],"name":"Cozinha"}` (o nome acompanha o cômodo após edições) |
 | Ajustar um elemento (espessura, tipo, largura…) | `PATCH .../scene/entities/{eid}` `{"thickness":0.25}` (`null` volta ao medido) |
 
 Cada resposta informa se cada restrição foi satisfeita e aponta conflitos e medidas incoerentes.

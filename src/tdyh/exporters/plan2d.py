@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..scenegraph import Opening, SceneGraph, Slab, Wall
+from ..scenegraph import Opening, SceneGraph, Separator, Slab, Space, Wall
 
 
 def _center(sg: SceneGraph) -> np.ndarray:
@@ -71,7 +71,8 @@ def to_dxf(sg: SceneGraph, path: Path) -> Path:
 
     doc = ezdxf.new("R2018", setup=True)
     doc.units = ezdxf.units.M
-    for name, color in (("PAREDES", 7), ("PISO", 8), ("ABERTURAS", 3), ("COTAS", 1)):
+    for name, color in (("PAREDES", 7), ("PISO", 8), ("ABERTURAS", 3), ("COTAS", 1),
+                        ("AMBIENTES", 5), ("SEPARADORES", 8)):
         doc.layers.add(name, color=color)
     st = doc.dimstyles.new("COTA_M")
     st.dxf.dimlfac, st.dxf.dimdec, st.dxf.dimtxt = 1.0, 2, 0.12   # metros, 2 casas
@@ -93,13 +94,24 @@ def to_dxf(sg: SceneGraph, path: Path) -> Path:
         side = 1 if (-_outward(w, center) @ left) > 0 else -1  # cota do lado de dentro
         msp.add_aligned_dim(p1=tuple(a), p2=tuple(b), distance=0.35 * side,
                             dimstyle="COTA_M", dxfattribs={"layer": "COTAS"}).render()
+    from ..rooms import interior_point
+    spaces = [e for e in sg.entities if isinstance(e, Space)]
     for s in sg.entities:
         if isinstance(s, Slab) and s.role == "floor":
             msp.add_lwpolyline(s.polygon, close=True, dxfattribs={"layer": "PISO", "linetype": "DASHED"})
-            c = np.mean(s.polygon, axis=0)
-            area = _area(s.polygon)
-            msp.add_text(f"{area:.2f} m²", height=0.15, dxfattribs={"layer": "COTAS"}) \
-               .set_placement(tuple(c), align=TextEntityAlignment.MIDDLE_CENTER)
+            if not spaces:
+                c = np.mean(s.polygon, axis=0)
+                msp.add_text(f"{_area(s.polygon):.2f} m²".replace(".", ","), height=0.15,
+                             dxfattribs={"layer": "COTAS"}).set_placement(tuple(c), align=TextEntityAlignment.MIDDLE_CENTER)
+    for sp in spaces:
+        c = interior_point(sp.polygon)
+        msp.add_text(sp.name, height=0.18, dxfattribs={"layer": "AMBIENTES"}).set_placement(
+            (c[0], c[1] + 0.12), align=TextEntityAlignment.MIDDLE_CENTER)
+        msp.add_text(f"{sp.net_area:.2f} m²".replace(".", ","), height=0.13, dxfattribs={"layer": "AMBIENTES"}) \
+           .set_placement((c[0], c[1] - 0.12), align=TextEntityAlignment.MIDDLE_CENTER)
+    for sep in sg.entities:
+        if isinstance(sep, Separator):
+            msp.add_line(sep.start, sep.end, dxfattribs={"layer": "SEPARADORES", "linetype": "DASHED"})
     for o in sg.entities:
         if isinstance(o, Opening) and o.host_wall in walls:
             p0, p1, n, d = _opening_geom(o, walls[o.host_wall], center)
@@ -130,6 +142,14 @@ def _area(poly) -> float:
     return float(abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) / 2)
 
 
+def _br(v: float) -> str:
+    return f"{v:.2f}".replace(".", ",")
+
+
+def _esc(t: str) -> str:
+    return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def to_svg(sg: SceneGraph, path: Path, scale: int = 50, margin_mm: float = 20) -> Path:
     """SVG em mm na escala 1:scale (padrão 1:50), Y invertido para leitura em planta."""
     lo, hi = _bounds(sg)
@@ -142,13 +162,24 @@ def to_svg(sg: SceneGraph, path: Path, scale: int = 50, margin_mm: float = 20) -
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W:.1f}mm" height="{H:.1f}mm" '
            f'viewBox="0 0 {W:.1f} {H:.1f}" font-family="sans-serif">',
            f'<rect width="100%" height="100%" fill="white"/>']
+    from ..rooms import interior_point
+    spaces = [e for e in sg.entities if isinstance(e, Space)]
+    palette = ["#f4f1ea", "#eaf1f4", "#f1f4ea", "#f4eaf0", "#eef0f7", "#f7f1e6"]
     for s in sg.entities:
         if isinstance(s, Slab) and s.role == "floor":
             pts = " ".join(tx(p) for p in s.polygon)
             out.append(f'<polygon points="{pts}" fill="#f4f1ea" stroke="#bbb" stroke-dasharray="2,1" stroke-width="0.2"/>')
-            c = np.mean(s.polygon, axis=0)
-            x, y = tx(c).split(",")
-            out.append(f'<text x="{x}" y="{y}" font-size="3" text-anchor="middle">{_area(s.polygon):.2f} m²</text>')
+            if not spaces:
+                x, y = tx(np.mean(s.polygon, axis=0)).split(",")
+                out.append(f'<text x="{x}" y="{y}" font-size="3" text-anchor="middle">'
+                           f'{_br(_area(s.polygon))} m²</text>')
+    for i, sp in enumerate(spaces):
+        pts = " ".join(tx(p) for p in sp.polygon)
+        out.append(f'<polygon points="{pts}" fill="{palette[i % len(palette)]}" stroke="none"/>')
+    for sep in sg.entities:
+        if isinstance(sep, Separator):
+            out.append(f'<polyline points="{tx(sep.start)} {tx(sep.end)}" stroke="#999" stroke-width="0.35" '
+                       f'stroke-dasharray="2,1.2"/>')
     center = _center(sg)
     walls = {e.id: e for e in sg.entities if isinstance(e, Wall)}
     for w in walls.values():
@@ -184,7 +215,16 @@ def to_svg(sg: SceneGraph, path: Path, scale: int = 50, margin_mm: float = 20) -
                 ang += 180
             out.append(f'<text x="{x}" y="{y}" font-size="2.5" text-anchor="middle" '
                        f'transform="rotate({ang:.1f} {x} {y})">{np.linalg.norm(b - a):.2f}</text>')
-    out.append(f'<text x="{margin_mm}" y="{H - 5:.1f}" font-size="3">Escala 1:{scale} — cotas em metros</text>')
+    for sp in spaces:
+        x, y = tx(interior_point(sp.polygon)).split(",")
+        out.append(f'<text x="{x}" y="{float(y) - 1.6:.2f}" font-size="3.2" font-weight="bold" '
+                   f'text-anchor="middle">{_esc(sp.name)}</text>')
+        out.append(f'<text x="{x}" y="{float(y) + 2.4:.2f}" font-size="2.6" text-anchor="middle">'
+                   f'{_br(sp.net_area)} m²</text>')
+    footer = f"Escala 1:{scale} — cotas em metros"
+    if spaces:
+        footer += f" — área útil total {_br(sum(sp.net_area for sp in spaces))} m²"
+    out.append(f'<text x="{margin_mm}" y="{H - 5:.1f}" font-size="3">{footer}</text>')
     out.append("</svg>")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(out))

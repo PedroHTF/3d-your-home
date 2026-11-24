@@ -17,7 +17,9 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.optimize import least_squares
 
-from .scenegraph import Constraint, Opening, SceneGraph, Slab, Wall
+from .scenegraph import Constraint, Opening, SceneGraph, Separator, Slab, Wall
+
+Linear = (Wall, Separator)
 
 MEASURE_KINDS = {"length", "distance", "ceiling_height", "opening_width", "opening_height",
                  "opening_sill", "opening_offset"}
@@ -193,10 +195,10 @@ def _topology(walls: list[Wall], tol: float = 0.03):
 
 def solve_geometry(sg: SceneGraph, w_constraint: float = 1e3, w_anchor: float = 1.0,
                    tol_m: float = 0.001, tol_deg: float = 0.1) -> list[ConstraintStatus]:
-    walls = [e for e in sg.entities if isinstance(e, Wall)]
+    walls = [e for e in sg.entities if isinstance(e, Linear)]
     cs = [c for c in sg.constraints if c.enabled and c.kind in GEOM_KINDS
           and not (c.mode == "scale" and c.kind in MEASURE_KINDS)]
-    bad = [c for c in cs if any(not isinstance(sg.get(r), Wall) for r in c.refs)]
+    bad = [c for c in cs if any(not isinstance(sg.get(r), Linear) for r in c.refs)]
     statuses = [ConstraintStatus(c.id, c.kind, False, float("nan"), "Referência inexistente ou não é parede.")
                 for c in bad]
     cs = [c for c in cs if c not in bad]
@@ -208,6 +210,10 @@ def solve_geometry(sg: SceneGraph, w_constraint: float = 1e3, w_anchor: float = 
         return statuses
     wid = {w.id: w for w in walls}
     fixed_pts = {idx[(r, e)] for c in cs if c.kind == "fixed" for r in c.refs for e in ("start", "end")}
+
+    # geometria MEDIDA é evidência (resiste); linhas desenhadas pelo usuário cedem primeiro
+    measured_pts = {idx[(w.id, e)] for w in walls if w.source == "auto" for e in ("start", "end")}
+    base_anchor = np.array([w_anchor if i in measured_pts else w_anchor * 1e-4 for i in range(len(P0))])
 
     def seg(P, w_id):
         return P[idx[(w_id, "start")]], P[idx[(w_id, "end")]]
@@ -243,7 +249,7 @@ def solve_geometry(sg: SceneGraph, w_constraint: float = 1e3, w_anchor: float = 
             a, b = seg(P, host)
             d = (b - a) / np.linalg.norm(b - a)
             res.append(w_constraint * (d[0] * (P[pi] - a)[1] - d[1] * (P[pi] - a)[0]))
-        anchor_w = np.where(np.isin(np.arange(len(P0)), list(fixed_pts)), w_constraint, w_anchor)
+        anchor_w = np.where(np.isin(np.arange(len(P0)), list(fixed_pts)), w_constraint, base_anchor)
         res.extend((anchor_w[:, None] * (P - P0)).ravel())
         return np.array(res)
 
@@ -369,7 +375,7 @@ def validate_openings(sg: SceneGraph) -> list[str]:
 def snap_point(sg: SceneGraph, q, tol: float = 0.10, exclude: str | None = None):
     """Encaixa um ponto num canto existente; senão, sobre a linha de uma parede (junção em T)."""
     q = np.asarray(q, float)
-    walls = [e for e in sg.entities if isinstance(e, Wall) and e.id != exclude]
+    walls = [e for e in sg.entities if isinstance(e, Linear) and e.id != exclude]
     corners = [np.array(p) for w in walls for p in (w.start, w.end)]
     if corners:
         d = [np.linalg.norm(q - c) for c in corners]
@@ -451,4 +457,7 @@ def rebuild(measured: SceneGraph) -> tuple[SceneGraph, SolveReport]:
     rep.statuses += solve_geometry(sg)
     rep.statuses += apply_opening_constraints(sg)
     rep.warnings += validate_openings(sg)
+    if sg.rooms_enabled:
+        from .rooms import build_spaces
+        rep.warnings += build_spaces(sg)
     return sg, rep

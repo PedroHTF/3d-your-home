@@ -327,6 +327,63 @@ def split_entity(pid: str, eid: str, body: SplitIn) -> dict:
     return {"created": list(ids), **_save_and_publish(pid, sg)}
 
 
+# ------------------------------------------------------------- cômodos (opcional)
+
+class RoomsToggle(BaseModel):
+    enabled: bool
+
+
+class LabelIn(BaseModel):
+    point: tuple[float, float]
+    name: str
+    use: str | None = None
+
+
+@app.put("/projects/{pid}/scene/rooms")
+def set_rooms(pid: str, body: RoomsToggle) -> dict:
+    """Liga/desliga a divisão em cômodos (desligada: a planta tem uma área total só)."""
+    sg = _load_measured(pid)
+    sg.rooms_enabled = body.enabled
+    return _save_and_publish(pid, sg)
+
+
+@app.get("/projects/{pid}/scene/rooms")
+def list_rooms(pid: str) -> list[dict]:
+    sg = get_scene(pid)
+    return [{"id": e.id, "name": e.name, "area": e.area, "net_area": e.net_area,
+             "perimeter": e.perimeter, "label_id": e.label_id, "polygon": e.polygon}
+            for e in sg.entities if e.type == "space"]
+
+
+@app.post("/projects/{pid}/scene/rooms/labels", status_code=201)
+def add_label(pid: str, body: LabelIn) -> dict:
+    """Dá nome ao cômodo que contém `point`. O nome continua valendo após editar paredes."""
+    from ..scenegraph import RoomLabel
+    sg = _load_measured(pid)
+    lb = RoomLabel(point=body.point, name=body.name, use=body.use)
+    sg.room_labels.append(lb)
+    return {"label": lb, **_save_and_publish(pid, sg)}
+
+
+@app.patch("/projects/{pid}/scene/rooms/labels/{lid}")
+def edit_label(pid: str, lid: str, patch: dict) -> dict:
+    sg = _load_measured(pid)
+    lb = next((x for x in sg.room_labels if x.id == lid), None)
+    if lb is None:
+        raise HTTPException(404, "nome não encontrado")
+    for k in ("name", "use", "point"):
+        if k in patch:
+            setattr(lb, k, tuple(patch[k]) if k == "point" else patch[k])
+    return _save_and_publish(pid, sg)
+
+
+@app.delete("/projects/{pid}/scene/rooms/labels/{lid}")
+def delete_label(pid: str, lid: str) -> dict:
+    sg = _load_measured(pid)
+    sg.room_labels = [x for x in sg.room_labels if x.id != lid]
+    return _save_and_publish(pid, sg)
+
+
 @app.get("/projects/{pid}/plan/{fmt}")
 def get_plan(pid: str, fmt: Literal["dxf", "svg"]):
     p = _pdir(pid) / "work" / "plan" / f"planta.{fmt}"
