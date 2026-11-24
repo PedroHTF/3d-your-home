@@ -57,6 +57,7 @@ class Link(BaseModel):
     thickness: float | None = None     # conhecida? senão é estimada (door_match / wall_contact)
     enabled: bool = True
     note: str | None = None
+    auto_key: str | None = None        # criada automaticamente (ex.: "aruco:7:A:B")
 
 
 class Building(BaseModel):
@@ -65,6 +66,7 @@ class Building(BaseModel):
     captures: list[Capture] = Field(default_factory=list)
     links: list[Link] = Field(default_factory=list)
     measured_thickness: dict[str, float] = Field(default_factory=dict)  # link id -> espessura estimada
+    ignored_auto: list[str] = Field(default_factory=list)  # ligações automáticas que o usuário apagou
 
     def cap(self, cid: str) -> Capture:
         return next(c for c in self.captures if c.id == cid)
@@ -482,6 +484,38 @@ def _score(sa: SceneGraph, sb: SceneGraph, pose) -> tuple[float, list[str]]:
     if aligned:
         why.append(f"{aligned} parede(s) alinhada(s) entre os cômodos")
     return s, why
+
+
+# ------------------------------------------------------------------ marcadores compartilhados
+
+def auto_marker_links(b: Building, scenes: dict[str, SceneGraph]) -> list[str]:
+    """Marcador ArUco (mesmo ID) visto em dois levantamentos = mesmo ponto físico: cria ligações
+    point_match automáticas (encadeadas na ordem das capturas). Não recria as que o usuário apagou
+    e não mexe nas que ele desligou."""
+    info = []
+    seen: dict[str, list[str]] = {}
+    for c in b.captures:
+        for mid in scenes[c.id].markers:
+            seen.setdefault(mid, []).append(c.id)
+    have = {lk.auto_key for lk in b.links if lk.auto_key}
+    for mid, caps in sorted(seen.items(), key=lambda kv: int(kv[0])):
+        if len(caps) > 2:
+            info.append(f"Marcador {mid} aparece em {len(caps)} levantamentos: use IDs diferentes por "
+                        "porta; ligado em cadeia mesmo assim.")
+        for ca, cb in zip(caps, caps[1:]):
+            key = f"aruco:{mid}:{ca}:{cb}"
+            if key in have or key in b.ignored_auto:
+                continue
+            pa, pb = scenes[ca].markers[mid], scenes[cb].markers[mid]
+            b.links.append(Link(kind="point_match", a=Ref(capture=ca, point=(pa[0], pa[1])),
+                                b=Ref(capture=cb, point=(pb[0], pb[1])), auto_key=key,
+                                note=f"marcador ArUco {mid} (automático)"))
+            info.append(f"Ligação automática pelo marcador {mid}: {b.cap(ca).name} ↔ {b.cap(cb).name}.")
+            dz = abs(pa[2] - pb[2])
+            if dz > 0.10:
+                info.append(f"Marcador {mid}: altura difere {dz * 100:.0f} cm entre os levantamentos "
+                            "(escala ou piso incoerente?).")
+    return info
 
 
 # ------------------------------------------------------------------ planta unificada
