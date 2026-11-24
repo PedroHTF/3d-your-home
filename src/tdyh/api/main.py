@@ -46,6 +46,18 @@ def health() -> dict:
             "gpu": shutil.which("nvidia-smi") is not None}
 
 
+@app.get("/markers.pdf")
+def markers_pdf(n: int = 6, start: int = 0, side_cm: float = 15.0):
+    """PDF A4 com marcadores ArUco (um por página) para escala métrica."""
+    from .. import markers
+    if not (1 <= n and 0 <= start and start + n <= 50):
+        raise HTTPException(422, "IDs devem ficar entre 0 e 49")
+    out = DATA / "markers" / f"aruco_{start}_{n}_{side_cm:g}cm.pdf"
+    if not out.exists():
+        markers.make_pdf(out, range(start, start + n), side_cm * 10)
+    return FileResponse(out, media_type="application/pdf", filename="marcadores.pdf")
+
+
 @app.post("/projects", status_code=201)
 def create_project(body: ProjectIn) -> dict:
     pid = uuid.uuid4().hex[:12]

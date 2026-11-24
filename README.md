@@ -45,6 +45,14 @@ tdyh plan scene_dense.ply data/sala --marker 0.15 --images images --colmap-txt s
 
 Com Docker + GPU NVIDIA: `docker compose up --build`.
 
+### Marcadores de escala
+
+```bash
+tdyh markers marcadores.pdf -n 6            # 6 marcadores (IDs 0–5), 15 cm, um por página A4
+tdyh markers quarto.pdf -n 4 --start 10     # outro cômodo: IDs 10–13
+```
+Também disponível em `GET /markers.pdf?n=6&side_cm=15`. Use um ID diferente em cada parede.
+
 ### Dicas de captura
 - Movimento lento, ~70% de sobreposição entre quadros, luz uniforme.
 - Para escala métrica, inclua um objeto de medida conhecida (ou um marcador ArUco impresso).

@@ -117,3 +117,17 @@ def test_cli_plan(tmp_path):
     cli.main(["plan", str(ply), str(tmp_path / "proj"), "--scale", "2.0"])
     assert (tmp_path / "proj" / "plan" / "planta.dxf").exists()
     assert (tmp_path / "proj" / "scene.json").exists()
+
+
+def test_marker_pdf_detectable_and_true_size(tmp_path):
+    import cv2
+    from tdyh import markers
+    page = markers.marker_page(3, side_mm=150, dpi=300)
+    assert page.size == (2480, 3508)  # A4 a 300 dpi
+    found = scale.detect_markers(np.array(page))
+    assert list(found) == [3]
+    c = found[3]
+    side_px = np.mean([np.linalg.norm(c[k] - c[(k + 1) % 4]) for k in range(4)])
+    assert abs(side_px / (300 / 25.4) - 150) < 1.0  # 150 mm ± 1 mm
+    pdf = markers.make_pdf(tmp_path / "m.pdf", range(6))
+    assert pdf.read_bytes().count(b"/Type /Page\n") + pdf.read_bytes().count(b"/Type /Page ") >= 1
