@@ -135,3 +135,40 @@ def scale_from_images(images_dir: Path, model_dir: Path, marker_size_m: float) -
         for mid, corners in detect_markers(img).items():
             obs.setdefault(mid, []).append((pose["P"], corners))
     return from_markers(obs, marker_size_m)
+
+
+# ---------- escala aproximada por tamanhos típicos (sem marcador) ----------
+
+PRIORS = {  # valor típico (m), desvio relativo — padrões brasileiros
+    "ceiling_height": (2.60, 0.07),
+    "door_height": (2.10, 0.03),
+}
+
+
+def coarse_from_extent(pts: np.ndarray, up: np.ndarray | None) -> float:
+    """Primeiro chute: altura do ambiente ~ pé-direito típico. Serve só para os limites
+    em metros dos algoritmos funcionarem; depois é refinado."""
+    if up is None:  # eixo de menor extensão costuma ser o vertical num cômodo
+        c = pts - pts.mean(axis=0)
+        up = np.linalg.svd(c[:: max(1, len(c) // 20000)], full_matrices=False)[2][-1]
+    z = pts @ (up / np.linalg.norm(up))
+    h = np.percentile(z, 99.5) - np.percentile(z, 0.5)
+    return PRIORS["ceiling_height"][0] / h if h > 0 else 1.0
+
+
+def from_priors(ceiling_m: float | None, door_heights_m: list[float]) -> ScaleEstimate:
+    """Refino: combina pé-direito e alturas de portas (medidos na escala atual) com os típicos.
+    Retorna fator de CORREÇÃO a aplicar sobre a escala atual."""
+    est, w = [], []
+    if ceiling_m:
+        v, sd = PRIORS["ceiling_height"]
+        est.append(v / ceiling_m); w.append(1 / sd**2)
+    for h in door_heights_m:
+        v, sd = PRIORS["door_height"]
+        if 0.7 < v / h < 1.4:  # descarta portas absurdas (provável erro de detecção)
+            est.append(v / h); w.append(1 / sd**2)
+    if not est:
+        return ScaleEstimate(1.0, "prior", 0.15)
+    est, w = np.array(est), np.array(w)
+    f = float((est * w).sum() / w.sum())
+    return ScaleEstimate(f, "prior", float(1 / np.sqrt(w.sum())), samples=len(est))

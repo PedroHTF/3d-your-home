@@ -20,6 +20,8 @@ Arquitetura completa: ver documento de arquitetura do projeto.
 | Escala métrica (ArUco, medida de referência) | `tdyh.scale` | ✅ |
 | 9 Layout: piso/teto, paredes, portas/janelas | `tdyh.layout` | ✅ |
 | Planta DXF + SVG 1:50 | `tdyh.exporters.plan2d` | ✅ |
+| Escala aproximada sem marcador (pé-direito/portas típicos) | `tdyh.scale` | ✅ |
+| Edição a posteriori: medidas, ajustes por elemento, restrições | `tdyh.constraints` | ✅ |
 | 4–8, 10 gsplat, segmentação, móveis, CAD, IFC | — | próximas fases |
 
 ## Uso local
@@ -44,6 +46,24 @@ tdyh plan scene_dense.ply data/sala --marker 0.15 --images images --colmap-txt s
 ```
 
 Com Docker + GPU NVIDIA: `docker compose up --build`.
+
+### Edição a posteriori (API)
+
+A geometria medida nunca é alterada; a cena final é recalculada a cada mudança:
+medida → escala → ajustes por elemento → restrições. Apagar/desativar algo restaura o estado anterior.
+
+| Ação | Requisição |
+|---|---|
+| Listar elementos e medidas | `GET /projects/{id}/scene/elements` |
+| Medida que corrige a escala de tudo | `POST .../scene/constraints` `{"kind":"length","refs":["<parede>"],"value":4.20,"mode":"scale"}` |
+| Fixar medida só de um elemento | idem com `"mode":"local"` (também `opening_width/height/sill/offset`, `ceiling_height`, `distance`) |
+| Paralelismo / perpendicularidade | `{"kind":"parallel"\|"perpendicular","refs":["<a>","<b>"]}` |
+| Ângulo entre paredes / orientação | `{"kind":"angle","refs":[a,b],"value":120}` · `{"kind":"orientation","refs":[a],"value":0}` |
+| Travar uma parede | `{"kind":"fixed","refs":["<a>"]}` |
+| Editar / desativar / apagar restrição | `PATCH` / `DELETE .../scene/constraints/{cid}` |
+| Ajustar um elemento (espessura, tipo, largura…) | `PATCH .../scene/entities/{eid}` `{"thickness":0.25}` (`null` volta ao medido) |
+
+Cada resposta informa se cada restrição foi satisfeita e aponta conflitos e medidas incoerentes.
 
 ### Marcadores de escala
 

@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .. import pipeline
-from ..scenegraph import SceneGraph
+from ..scenegraph import Constraint, SceneGraph
 
 DATA = Path(os.getenv("TDYH_DATA", "./data")).resolve()
 USE_CELERY = os.getenv("TDYH_USE_CELERY", "0") == "1"
@@ -154,6 +154,99 @@ def build_plan(pid: str, ref: ScaleIn | None = None) -> dict:
         est = sc.from_reference(ref.p1, ref.p2, ref.real_m)
         s, src = est.factor, est.source
     return pipeline.make_plan(Path(dense), _pdir(pid) / "work", s, src)
+
+
+# ------------------------------------------------------------- edição a posteriori
+
+def _work(pid: str) -> Path:
+    w = _pdir(pid) / "work"
+    if not (w / "scene_measured.json").exists():
+        raise HTTPException(409, "planta ainda não gerada")
+    return w
+
+
+def _load_measured(pid: str) -> SceneGraph:
+    return SceneGraph.model_validate_json((_work(pid) / "scene_measured.json").read_text())
+
+
+def _save_and_publish(pid: str, sg: SceneGraph) -> dict:
+    w = _work(pid)
+    (w / "scene_measured.json").write_text(sg.model_dump_json(indent=2))
+    return pipeline.publish(w)
+
+
+@app.get("/projects/{pid}/scene/elements")
+def list_elements(pid: str) -> list[dict]:
+    """Lista elementos da cena FINAL com suas medidas atuais (para escolher o que editar)."""
+    import numpy as np
+    sg = get_scene(pid)
+    out = []
+    for e in sg.entities:
+        d = {"id": e.id, "type": e.type, "confidence": e.confidence, "source": e.source}
+        if e.type == "wall":
+            d |= {"length": round(float(np.linalg.norm(np.subtract(e.end, e.start))), 3),
+                  "start": e.start, "end": e.end, "thickness": e.thickness, "height": e.height}
+        elif e.type == "opening":
+            d |= {"kind": e.kind.value, "host_wall": e.host_wall, "offset": e.offset,
+                  "width": e.width, "height": e.height, "sill": e.sill}
+        out.append(d)
+    return out
+
+
+@app.get("/projects/{pid}/scene/constraints")
+def list_constraints(pid: str) -> list[Constraint]:
+    return _load_measured(pid).constraints
+
+
+@app.post("/projects/{pid}/scene/constraints", status_code=201)
+def add_constraint(pid: str, c: Constraint) -> dict:
+    """Ex.: {"kind":"length","refs":["<parede>"],"value":4.20,"mode":"scale"} corrige a escala de tudo;
+    {"kind":"perpendicular","refs":["<a>","<b>"]} endireita um canto."""
+    sg = _load_measured(pid)
+    for r in c.refs:
+        if sg.get(r) is None:
+            raise HTTPException(422, f"elemento {r} não existe")
+    sg.constraints.append(c)
+    return {"constraint": c, **_save_and_publish(pid, sg)}
+
+
+@app.patch("/projects/{pid}/scene/constraints/{cid}")
+def edit_constraint(pid: str, cid: str, patch: dict) -> dict:
+    sg = _load_measured(pid)
+    c = next((x for x in sg.constraints if x.id == cid), None)
+    if c is None:
+        raise HTTPException(404, "restrição não encontrada")
+    for k in ("value", "enabled", "mode", "note"):
+        if k in patch:
+            setattr(c, k, patch[k])
+    return _save_and_publish(pid, sg)
+
+
+@app.delete("/projects/{pid}/scene/constraints/{cid}")
+def delete_constraint(pid: str, cid: str) -> dict:
+    sg = _load_measured(pid)
+    sg.constraints = [x for x in sg.constraints if x.id != cid]
+    return _save_and_publish(pid, sg)
+
+
+@app.patch("/projects/{pid}/scene/entities/{eid}")
+def edit_entity(pid: str, eid: str, params: dict) -> dict:
+    """Ajuste manual de UM elemento (ex.: espessura de uma parede, tipo/largura de uma abertura).
+    Valores null removem o ajuste e voltam ao medido."""
+    sg = _load_measured(pid)
+    if sg.get(eid) is None:
+        raise HTTPException(404, "elemento não encontrado")
+    cur = sg.overrides.get(eid, {})
+    for k, v in params.items():
+        if v is None:
+            cur.pop(k, None)
+        else:
+            cur[k] = v
+    if cur:
+        sg.overrides[eid] = cur
+    else:
+        sg.overrides.pop(eid, None)
+    return _save_and_publish(pid, sg)
 
 
 @app.get("/projects/{pid}/plan/{fmt}")
