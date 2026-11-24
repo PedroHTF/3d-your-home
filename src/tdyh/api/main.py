@@ -123,6 +123,35 @@ def get_scene(pid: str) -> SceneGraph:
     return SceneGraph.model_validate_json(p.read_text()) if p.exists() else SceneGraph()
 
 
+class ScaleIn(BaseModel):
+    p1: tuple[float, float, float]
+    p2: tuple[float, float, float]
+    real_m: float
+
+
+@app.post("/projects/{pid}/plan")
+def build_plan(pid: str, ref: ScaleIn | None = None) -> dict:
+    """(Re)gera a planta a partir da nuvem densa; opcionalmente com medida de referência."""
+    from .. import scale as sc
+    rep = get_report(pid)
+    dense = rep.get("stages", {}).get("mvs", {}).get("dense")
+    if not dense:
+        raise HTTPException(409, "nuvem densa ainda não existe")
+    s, src = 1.0, "unknown"
+    if ref:
+        est = sc.from_reference(ref.p1, ref.p2, ref.real_m)
+        s, src = est.factor, est.source
+    return pipeline.make_plan(Path(dense), _pdir(pid) / "work", s, src)
+
+
+@app.get("/projects/{pid}/plan/{fmt}")
+def get_plan(pid: str, fmt: Literal["dxf", "svg"]):
+    p = _pdir(pid) / "work" / "plan" / f"planta.{fmt}"
+    if not p.exists():
+        raise HTTPException(404, "planta ainda não gerada")
+    return FileResponse(p)
+
+
 @app.get("/projects/{pid}/artifacts/{kind}")
 def get_artifact(pid: str, kind: Literal["dense", "mesh", "textured"]):
     rep = get_report(pid)

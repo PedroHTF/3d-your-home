@@ -17,7 +17,10 @@ Arquitetura completa: ver documento de arquitetura do projeto.
 | 3b MVS + malha OpenMVS | `tdyh.recon.openmvs` | ✅ adaptador |
 | Grafo de cena | `tdyh.scenegraph` | ✅ modelo inicial |
 | API FastAPI + Celery | `tdyh.api`, `tdyh.worker` | ✅ |
-| 4–10 gsplat, segmentação, layout, CAD, IFC | — | próximas fases |
+| Escala métrica (ArUco, medida de referência) | `tdyh.scale` | ✅ |
+| 9 Layout: piso/teto, paredes, portas/janelas | `tdyh.layout` | ✅ |
+| Planta DXF + SVG 1:50 | `tdyh.exporters.plan2d` | ✅ |
+| 4–8, 10 gsplat, segmentação, móveis, CAD, IFC | — | próximas fases |
 
 ## Uso local
 
@@ -28,6 +31,16 @@ pip install -e .[dev]
 tdyh run caminho/do/video.mp4 data/sala        # pipeline completo local
 pytest -q                                        # testes
 uvicorn tdyh.api.main:app --reload               # API em http://localhost:8000/docs
+```
+
+Planta a partir de uma nuvem densa já existente:
+
+```bash
+# com medida conhecida (fator modelo->metros)
+tdyh plan scene_dense.ply data/sala --scale 2.0
+# com marcador ArUco 4x4 (DICT_4X4_50) impresso de 15 cm
+colmap model_converter --input_path sparse/0 --output_path sparse_txt --output_type TXT
+tdyh plan scene_dense.ply data/sala --marker 0.15 --images images --colmap-txt sparse_txt
 ```
 
 Com Docker + GPU NVIDIA: `docker compose up --build`.
