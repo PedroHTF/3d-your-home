@@ -163,7 +163,7 @@ def build_spaces(sg: SceneGraph) -> list[str]:
         spaces.append(Space(name=lb.name if lb else f"Cômodo {k + 1}",
                             polygon=[tuple(map(float, q)) for q in poly],
                             area=round(area, 3), net_area=round(area - deduct, 3), perimeter=round(per, 3),
-                            label_id=lb.id if lb else None))
+                            label_id=lb.id if lb else None, use=lb.use if lb else None))
     for lb in sg.room_labels:
         if lb.id not in used_labels:
             warn.append(f"Nome '{lb.name}' está fora de qualquer cômodo (o ambiente pode ter sido alterado).")

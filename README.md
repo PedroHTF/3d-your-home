@@ -91,6 +91,22 @@ Cada levantamento é um projeto com planta própria (já em metros). Uma *edific
 A espessura da parede entre cômodos vem da profundidade do batente das portas (medida na detecção);
 sem ela, usa 15 cm e avisa. Corrija a escala de cada levantamento antes de juntar.
 
+### Exportação IFC/BIM (M3)
+
+Requer `pip install -e '.[ifc]'` (IfcOpenShell). Gera IFC4 em metros a partir da cena final:
+IfcProject/Site/Building/BuildingStorey, IfcWall (espessura para o mesmo lado da planta; paredes
+compartilhadas uma vez só), IfcOpeningElement + IfcDoor/IfcWindow (portas duplicadas uma vez só),
+IfcSlab de piso e teto (teto inferido do piso, se faltar), IfcSpace por cômodo (nome, uso, área,
+área útil). Psets `TDYH_Parametros` e `TDYH_Origem` (medida / inferida / usuário, confiança, escala),
+além dos Qto_* padrão.
+
+```bash
+tdyh ifc projeto/work/scene.json modelo.ifc --name "Apartamento"
+python scripts/render_ifc.py modelo.ifc previa.png   # pré-visualização com os vazios aplicados
+```
+API: `GET /projects/{id}/ifc` e `GET /buildings/{id}/ifc` (após `POST /buildings/{id}/solve`);
+avisos no cabeçalho `X-TDYH-Warnings`.
+
 ### Marcadores de escala
 
 ```bash

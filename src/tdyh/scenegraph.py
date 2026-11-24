@@ -53,6 +53,7 @@ class Space(Entity):
     net_area: float        # m², descontando metade da espessura das paredes internas
     perimeter: float
     label_id: str | None = None
+    use: str | None = None  # uso do cômodo (do rótulo), vai para o IFC
 
 
 class RoomLabel(BaseModel):
