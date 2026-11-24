@@ -130,6 +130,23 @@ def _components(mask: np.ndarray, close: int = 3):
         yield (t0, t0 + wt - 1, z0, z0 + wz - 1, area, lab == c)
 
 
+def reveal_depth(w: Wall, o: Opening, pts: np.ndarray, center_xy: np.ndarray, band: float = 0.04,
+                 max_depth: float = 0.45) -> float | None:
+    """Espessura da parede no vão: pontos das faces laterais do batente (junto às bordas do vão,
+    atrás do plano da parede). Retorna None se o batente não foi visto."""
+    a, d, n, L = wall_frame(w, center_xy)
+    rel = pts[:, :2] - a
+    t, dist, z = rel @ d, rel @ n, pts[:, 2]
+    top = o.sill + o.height
+    zin = (z > o.sill + 0.1) & (z < top - 0.1)
+    depths = []
+    for edge in (o.offset, o.offset + o.width):
+        m = zin & (np.abs(t - edge) < band) & (dist > 0.02) & (dist < max_depth)
+        if m.sum() >= 15:
+            depths.append(float(np.percentile(dist[m], 97)))
+    return round(float(np.median(depths)), 3) if depths else None
+
+
 def openings_from_grid(w: Wall, g: WallGrid, min_width: float = 0.45, min_height: float = 0.4,
                        door_floor: float = 0.15, min_evidence_m2: float = 0.1) -> tuple[list[Opening], list[str]]:
     st, c = g.state, g.cell

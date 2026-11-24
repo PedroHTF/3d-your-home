@@ -92,8 +92,9 @@ def to_dxf(sg: SceneGraph, path: Path) -> Path:
         d = (b - a) / np.linalg.norm(b - a)
         left = np.array([-d[1], d[0]])
         side = 1 if (-_outward(w, center) @ left) > 0 else -1  # cota do lado de dentro
-        msp.add_aligned_dim(p1=tuple(a), p2=tuple(b), distance=0.35 * side,
-                            dimstyle="COTA_M", dxfattribs={"layer": "COTAS"}).render()
+        if not w.shared_with:
+            msp.add_aligned_dim(p1=tuple(a), p2=tuple(b), distance=0.35 * side,
+                                dimstyle="COTA_M", dxfattribs={"layer": "COTAS"}).render()
     from ..rooms import interior_point
     spaces = [e for e in sg.entities if isinstance(e, Space)]
     for s in sg.entities:
@@ -117,6 +118,8 @@ def to_dxf(sg: SceneGraph, path: Path) -> Path:
             p0, p1, n, d = _opening_geom(o, walls[o.host_wall], center)
             msp.add_lwpolyline([tuple(p0), tuple(p1), tuple(p1 + n), tuple(p0 + n)], close=True,
                                dxfattribs={"layer": "ABERTURAS"})
+            if o.duplicate_of:
+                continue
             if o.kind.value == "door":
                 inward = -n / np.linalg.norm(n)
                 if o.source == "inferred":
@@ -191,6 +194,8 @@ def to_svg(sg: SceneGraph, path: Path, scale: int = 50, margin_mm: float = 20) -
             e = n / np.linalg.norm(n) * 0.01
             gap = " ".join(tx(p) for p in (p0 - e, p1 - e, p1 + n + e, p0 + n + e))
             out.append(f'<polygon points="{gap}" fill="white"/>')
+            if o.duplicate_of:
+                continue
             if o.kind.value == "door":
                 inward = -n / np.linalg.norm(n)
                 tip, arc_end = p0 + inward * o.width, p1
@@ -204,7 +209,7 @@ def to_svg(sg: SceneGraph, path: Path, scale: int = 50, margin_mm: float = 20) -
                 m0, m1 = p0 + n / 2, p1 + n / 2
                 out.append(f'<polyline points="{tx(m0)} {tx(m1)}" stroke="#27a" stroke-width="0.4"/>')
     for w in walls.values():
-        if True:
+        if not w.shared_with:  # parede compartilhada: cota uma vez só
             a, b = np.array(w.start), np.array(w.end)
             m = (a + b) / 2
             d = (b - a) / np.linalg.norm(b - a)

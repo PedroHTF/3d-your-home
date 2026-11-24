@@ -24,6 +24,7 @@ Arquitetura completa: ver documento de arquitetura do projeto.
 | Edição a posteriori: medidas, ajustes por elemento, restrições | `tdyh.constraints` | ✅ |
 | Criar/remover/dividir elementos | `tdyh.constraints`, API | ✅ |
 | Cômodos opcionais (nome, área, área útil, perímetro) | `tdyh.rooms` | ✅ |
+| Juntar levantamentos diferentes (portas, paredes, pontos; ajuste global) | `tdyh.building` | ✅ |
 | 4–8, 10 gsplat, segmentação, móveis, CAD, IFC | — | próximas fases |
 
 ## Uso local
@@ -72,6 +73,23 @@ medida → escala → ajustes por elemento → restrições. Apagar/desativar al
 | Ajustar um elemento (espessura, tipo, largura…) | `PATCH .../scene/entities/{eid}` `{"thickness":0.25}` (`null` volta ao medido) |
 
 Cada resposta informa se cada restrição foi satisfeita e aponta conflitos e medidas incoerentes.
+
+### Juntar cômodos de levantamentos diferentes
+
+Cada levantamento é um projeto com planta própria (já em metros). Uma *edificação* reúne vários:
+
+1. `POST /buildings` `{"name":"Apto"}` e `POST /buildings/{id}/captures` `{"project_id":...}` para cada levantamento.
+2. `GET /buildings/{id}/suggestions` — pares de portas que provavelmente são a mesma, com pontuação,
+   motivos e aviso de **ambiguidade** (portas e cômodos parecidos encaixam de mais de um jeito).
+3. Confirme criando ligações: `POST /buildings/{id}/links` —
+   `door_match` (mesma porta), `wall_contact` (parede encostada), `collinear` (paredes na mesma linha,
+   ex.: fachada), `point_match` (mesmo ponto físico, ex.: canto ou marcador compartilhado).
+   Posição manual: `PUT /buildings/{id}/captures/{cid}/pose`.
+4. `POST /buildings/{id}/solve` — ajuste global de todas as posições (em ciclos o erro é repartido),
+   junção das paredes compartilhadas (espessura medida) e planta unificada em `GET /buildings/{id}/plan/{dxf|svg}`.
+
+A espessura da parede entre cômodos vem da profundidade do batente das portas (medida na detecção);
+sem ela, usa 15 cm e avisa. Corrija a escala de cada levantamento antes de juntar.
 
 ### Marcadores de escala
 

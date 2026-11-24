@@ -399,3 +399,164 @@ def get_artifact(pid: str, kind: Literal["dense", "mesh", "textured"]):
     if not path or not Path(path).exists():
         raise HTTPException(404, "artefato indisponível")
     return FileResponse(path)
+
+
+# ============================================================= edificação (vários levantamentos)
+
+def _bfile(bid: str) -> Path:
+    f = DATA / "buildings" / f"{bid}.json"
+    if not f.exists():
+        raise HTTPException(404, "edificação não encontrada")
+    return f
+
+
+def _bload(bid: str):
+    from ..building import Building
+    return Building.model_validate_json(_bfile(bid).read_text())
+
+
+def _bsave(b) -> None:
+    (DATA / "buildings").mkdir(parents=True, exist_ok=True)
+    (DATA / "buildings" / f"{b.id}.json").write_text(b.model_dump_json(indent=2))
+
+
+def _bscenes(b) -> dict:
+    out = {}
+    for c in b.captures:
+        out[c.id] = get_scene(c.project_id)
+        if not out[c.id].entities:
+            raise HTTPException(409, f"levantamento '{c.name}' ainda não tem planta")
+    return out
+
+
+class BuildingIn(BaseModel):
+    name: str
+
+
+class CaptureIn(BaseModel):
+    project_id: str
+    name: str | None = None
+
+
+@app.post("/buildings", status_code=201)
+def create_building(body: BuildingIn) -> dict:
+    from ..building import Building
+    b = Building(name=body.name)
+    _bsave(b)
+    return b.model_dump()
+
+
+@app.get("/buildings/{bid}")
+def get_building(bid: str) -> dict:
+    return _bload(bid).model_dump()
+
+
+@app.post("/buildings/{bid}/captures", status_code=201)
+def add_capture(bid: str, body: CaptureIn) -> dict:
+    """Adiciona um levantamento (projeto já com planta) à edificação."""
+    from ..building import Capture
+    b = _bload(bid)
+    meta = get_project(body.project_id)
+    c = Capture(name=body.name or meta["name"], project_id=body.project_id)
+    b.captures.append(c)
+    _bsave(b)
+    return c.model_dump()
+
+
+@app.delete("/buildings/{bid}/captures/{cid}")
+def remove_capture(bid: str, cid: str) -> dict:
+    b = _bload(bid)
+    b.captures = [c for c in b.captures if c.id != cid]
+    b.links = [lk for lk in b.links if cid not in (lk.a.capture, lk.b.capture)]
+    _bsave(b)
+    return b.model_dump()
+
+
+@app.put("/buildings/{bid}/captures/{cid}/pose")
+def set_pose(bid: str, cid: str, pose: dict) -> dict:
+    """Posição manual (x, y em m; theta_deg) e/ou trava (locked)."""
+    b = _bload(bid)
+    c = next((c for c in b.captures if c.id == cid), None)
+    if c is None:
+        raise HTTPException(404, "levantamento não encontrado")
+    for k in ("x", "y", "theta_deg", "locked"):
+        if k in pose:
+            setattr(c.pose, k, pose[k])
+    _bsave(b)
+    return c.model_dump()
+
+
+@app.get("/buildings/{bid}/suggestions")
+def building_suggestions(bid: str, limit: int = 10) -> list[dict]:
+    """Pares de portas que provavelmente são a mesma, com pontuação e motivos."""
+    from dataclasses import asdict
+
+    from ..building import suggest_door_matches
+    b = _bload(bid)
+    return [asdict(s) for s in suggest_door_matches(b, _bscenes(b))[:limit]]
+
+
+@app.post("/buildings/{bid}/links", status_code=201)
+def add_link(bid: str, body: dict) -> dict:
+    """{"kind":"door_match","a":{"capture":..,"element":..},"b":{...}} | wall_contact | collinear |
+    point_match (com "point":[x,y]); "thickness" opcional."""
+    from pydantic import ValidationError
+
+    from ..building import Link
+    b = _bload(bid)
+    try:
+        lk = Link.model_validate(body)
+    except ValidationError as err:
+        raise HTTPException(422, err.errors(include_url=False))
+    ids = {c.id for c in b.captures}
+    if lk.a.capture not in ids or lk.b.capture not in ids:
+        raise HTTPException(422, "levantamento inexistente na ligação")
+    b.links.append(lk)
+    _bsave(b)
+    return lk.model_dump()
+
+
+@app.delete("/buildings/{bid}/links/{lid}")
+def delete_link(bid: str, lid: str) -> dict:
+    b = _bload(bid)
+    b.links = [lk for lk in b.links if lk.id != lid]
+    _bsave(b)
+    return b.model_dump()
+
+
+@app.post("/buildings/{bid}/solve")
+def solve_building(bid: str) -> dict:
+    """Ajuste global das posições + planta unificada (DXF/SVG)."""
+    from dataclasses import asdict
+
+    from ..building import apply_poses, merge, solve_poses
+    from ..exporters import plan2d
+    b = _bload(bid)
+    if not b.captures:
+        raise HTTPException(409, "edificação sem levantamentos")
+    scenes = _bscenes(b)
+    res = solve_poses(b, scenes)
+    apply_poses(b, res)
+    _bsave(b)
+    merged, info = merge(b, scenes, res)
+    out = DATA / "buildings" / b.id
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "scene.json").write_text(merged.model_dump_json(indent=2))
+    plan2d.to_dxf(merged, out / "planta.dxf")
+    plan2d.to_svg(merged, out / "planta.svg")
+    scales = {c.name: get_scene(c.project_id).scale_source for c in b.captures}
+    warn = res.warnings + [f"Levantamento '{n}' com escala {s}: corrija a escala antes de juntar."
+                           for n, s in scales.items() if s in ("prior", "unknown")]
+    return {"poses": {c.id: c.pose.model_dump() for c in b.captures},
+            "links": [asdict(s) for s in res.statuses], "ok": all(s.ok for s in res.statuses),
+            "shared_walls": info, "warnings": warn,
+            "rooms": [{"name": e.name, "area": e.area, "net_area": e.net_area}
+                      for e in merged.entities if e.type == "space"]}
+
+
+@app.get("/buildings/{bid}/plan/{fmt}")
+def building_plan(bid: str, fmt: Literal["dxf", "svg"]):
+    f = DATA / "buildings" / bid / f"planta.{fmt}"
+    if not f.exists():
+        raise HTTPException(404, "planta unificada ainda não gerada (POST /solve)")
+    return FileResponse(f)

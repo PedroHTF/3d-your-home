@@ -32,6 +32,7 @@ class Wall(Entity):
     end: tuple[float, float]
     thickness: float = 0.15
     height: float = 2.7
+    shared_with: str | None = None  # mesma parede física vista de outro levantamento
 
 
 class Separator(Entity):
@@ -76,6 +77,8 @@ class Opening(Entity):
     width: float
     height: float
     sill: float = 0.0
+    duplicate_of: str | None = None  # mesma porta vista de outro levantamento (desenha só o vão)
+    depth: float | None = None       # profundidade do vão = espessura da parede ali (medida pelo batente)
 
 
 class Slab(Entity):

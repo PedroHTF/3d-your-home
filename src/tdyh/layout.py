@@ -225,6 +225,9 @@ def build_layout(pts: np.ndarray, scale: float = 1.0, up_hint: np.ndarray | None
         for w in walls:
             g = op.build_grid(w, rot, height, center, cams, vis_pairs, occl)
             found, wn = op.openings_from_grid(w, g)
+            for o in found:
+                if o.source != "inferred":
+                    o.depth = op.reveal_depth(w, o, rot, center)
             sg.entities.extend(found)
             notes.extend(wn)
     poly = room_polygon(segs, inner)
