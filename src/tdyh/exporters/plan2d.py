@@ -57,6 +57,10 @@ def to_dxf(sg: SceneGraph, path: Path) -> Path:
     doc.units = ezdxf.units.M
     for name, color in (("PAREDES", 7), ("PISO", 8), ("ABERTURAS", 3), ("COTAS", 1)):
         doc.layers.add(name, color=color)
+    st = doc.dimstyles.new("COTA_M")
+    st.dxf.dimlfac, st.dxf.dimdec, st.dxf.dimtxt = 1.0, 2, 0.12   # metros, 2 casas
+    st.dxf.dimasz, st.dxf.dimexo, st.dxf.dimexe, st.dxf.dimgap = 0.08, 0.05, 0.05, 0.03
+    st.dxf.dimtsz, st.dxf.dimtad, st.dxf.dimzin = 0.06, 1, 0                         # tique, texto acima, mantém zeros (4,20)
     msp = doc.modelspace()
     walls = {e.id: e for e in sg.entities if isinstance(e, Wall)}
     center = _center(sg)
@@ -66,10 +70,13 @@ def to_dxf(sg: SceneGraph, path: Path) -> Path:
         hatch = msp.add_hatch(color=7, dxfattribs={"layer": "PAREDES"})
         hatch.paths.add_polyline_path([tuple(p) for p in poly], is_closed=True)
         a, b = np.array(w.start), np.array(w.end)
+        if (b[0] - a[0]) < -1e-6 or (abs(b[0] - a[0]) <= 1e-6 and b[1] < a[1]):
+            a, b = b, a  # texto sempre legível (esquerda->direita / baixo->cima)
         d = (b - a) / np.linalg.norm(b - a)
-        side = 1 if (_outward(w, center) @ np.array([-d[1], d[0]])) < 0 else -1  # cota para dentro
+        left = np.array([-d[1], d[0]])
+        side = 1 if (-_outward(w, center) @ left) > 0 else -1  # cota do lado de dentro
         msp.add_aligned_dim(p1=tuple(a), p2=tuple(b), distance=0.35 * side,
-                            dimstyle="EZDXF", dxfattribs={"layer": "COTAS"}).render()
+                            dimstyle="COTA_M", dxfattribs={"layer": "COTAS"}).render()
     for s in sg.entities:
         if isinstance(s, Slab) and s.role == "floor":
             msp.add_lwpolyline(s.polygon, close=True, dxfattribs={"layer": "PISO", "linetype": "DASHED"})
@@ -86,8 +93,9 @@ def to_dxf(sg: SceneGraph, path: Path) -> Path:
                 inward = -n / np.linalg.norm(n)
                 a0 = np.degrees(np.arctan2(d[1], d[0]))
                 a1 = np.degrees(np.arctan2(inward[1], inward[0]))
-                lo, hi = sorted([a0, a1]) if abs(a1 - a0) <= 180 else sorted([a1, a0])[::-1]
-                msp.add_arc(tuple(p0), o.width, lo, hi, dxfattribs={"layer": "ABERTURAS"})
+                cross = d[0] * inward[1] - d[1] * inward[0]
+                start, end = (a0, a1) if cross > 0 else (a1, a0)  # arcos DXF são anti-horários
+                msp.add_arc(tuple(p0), o.width, start, end, dxfattribs={"layer": "ABERTURAS"})
                 msp.add_line(tuple(p0), tuple(p0 + inward * o.width), dxfattribs={"layer": "ABERTURAS"})
             else:
                 mid = n / 2
@@ -138,7 +146,7 @@ def to_svg(sg: SceneGraph, path: Path, scale: int = 50, margin_mm: float = 20) -
                 tip, arc_end = p0 + inward * o.width, p1
                 r = o.width * k
                 cross = d[0] * inward[1] - d[1] * inward[0]
-                sweep = 0 if cross > 0 else 1  # Y do SVG é invertido
+                sweep = 1 if cross > 0 else 0  # Y do SVG é invertido: CCW no mundo = horário na tela
                 out.append(f'<path d="M {tx(p0)} L {tx(tip)} A {r:.2f} {r:.2f} 0 0 {sweep} {tx(arc_end)}" '
                            f'fill="none" stroke="#2a7" stroke-width="0.3"/>')
             else:
