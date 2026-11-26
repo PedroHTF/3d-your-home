@@ -123,9 +123,25 @@ def make_plan(dense_ply: Path, project_dir: Path, scale: float = 1.0, scale_sour
         res.notes.append(f"Escala ESTIMADA por tamanhos típicos (±{unc:.0%}). Informe uma medida real "
                          "(ex.: comprimento de uma parede) para corrigir.")
     (project_dir / "scene_measured.json").write_text(res.scene.model_dump_json(indent=2))
+    save_view_points(pts, res.rotation, scale, res.floor_offset, project_dir)
     out = publish(project_dir)
     out["notes"] = res.notes + out.get("warnings", [])
     out["height_m"] = round(res.ceiling_z - res.floor_z, 3)
+    return out
+
+
+def save_view_points(pts: np.ndarray, rotation: np.ndarray, scale: float, floor_offset: float,
+                     project_dir: Path, max_points: int = 300_000, seed: int = 0) -> Path:
+    """Amostra da nuvem densa no sistema da planta (float32 x,y,z) para o visualizador.
+    Guarda a escala da medição: se o usuário recalibrar, o servidor reescala os pontos."""
+    import json
+    pts = np.asarray(pts, float)
+    if len(pts) > max_points:
+        pts = pts[np.random.default_rng(seed).choice(len(pts), max_points, replace=False)]
+    q = (pts * scale) @ np.asarray(rotation, float).T - np.array([0.0, 0.0, floor_offset])
+    out = project_dir / "view_points.bin"
+    q.astype("<f4").tofile(out)
+    (project_dir / "view_points.json").write_text(json.dumps({"count": int(len(q)), "scale_factor": scale}))
     return out
 
 

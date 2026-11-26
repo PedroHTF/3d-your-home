@@ -98,6 +98,79 @@ async def calibrate_lens(files: list[UploadFile], square_mm: float | None = None
         raise HTTPException(422, str(e))
 
 
+# ------------------------------------------------------------------ visualizador 3D
+
+VIEWER_DIR = Path(__file__).resolve().parents[1] / "viewer_dist"
+
+
+@app.get("/projects")
+def list_projects() -> list[dict]:
+    out = []
+    for d in sorted((DATA / "projects").glob("*/project.json")):
+        meta = json.loads(d.read_text())
+        out.append({"id": d.parent.name, "name": meta.get("name", d.parent.name),
+                    "has_plan": (d.parent / "work" / "scene.json").exists()})
+    return out
+
+
+@app.get("/buildings")
+def list_buildings() -> list[dict]:
+    out = []
+    for d in sorted((DATA / "buildings").glob("*.json")):
+        b = json.loads(d.read_text())
+        out.append({"id": d.stem, "name": b.get("name", d.stem),
+                    "has_plan": (DATA / "buildings" / d.stem / "scene.json").exists()})
+    return out
+
+
+@app.get("/projects/{pid}/view.json")
+def project_view(pid: str) -> dict:
+    """Cena 3D (paredes recortadas nos vãos, aberturas, lajes, cômodos) para o visualizador."""
+    from ..exporters.view3d import build_view
+    sg = get_scene(pid)
+    if not sg.entities:
+        raise HTTPException(409, "levantamento ainda não tem planta")
+    name = json.loads((_pdir(pid) / "project.json").read_text()).get("name", pid)
+    v = build_view(sg, name)
+    v["points"] = f"/projects/{pid}/points.bin" if (_pdir(pid) / "work" / "view_points.bin").exists() else None
+    return v
+
+
+@app.get("/projects/{pid}/points.bin")
+def project_points(pid: str):
+    """Amostra da nuvem densa (float32 x,y,z, little-endian), já na escala atual da planta."""
+    import numpy as np
+    from fastapi import Response
+    work = _pdir(pid) / "work"
+    f, meta = work / "view_points.bin", work / "view_points.json"
+    if not f.exists():
+        raise HTTPException(404, "sem nuvem de pontos")
+    pts = np.fromfile(f, "<f4")
+    m = json.loads(meta.read_text()) if meta.exists() else {}
+    k = get_scene(pid).scale_factor / m["scale_factor"] if m.get("scale_factor") else 1.0
+    if abs(k - 1) > 1e-9:
+        pts = (pts * k).astype("<f4")
+    return Response(pts.tobytes(), media_type="application/octet-stream")
+
+
+@app.get("/buildings/{bid}/view.json")
+def building_view(bid: str) -> dict:
+    from ..exporters.view3d import build_view
+    b = _bload(bid)
+    f = DATA / "buildings" / bid / "scene.json"
+    if not f.exists():
+        raise HTTPException(404, "planta unificada ainda não gerada (POST /solve)")
+    v = build_view(SceneGraph.model_validate_json(f.read_text()), b.name)
+    v["points"] = None  # nuvens de vários levantamentos: ainda não unidas
+    return v
+
+
+@app.get("/")
+def root():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse("/viewer/")
+
+
 @app.post("/projects", status_code=201)
 def create_project(body: ProjectIn) -> dict:
     pid = uuid.uuid4().hex[:12]
@@ -639,3 +712,8 @@ def building_plan(bid: str, fmt: Literal["dxf", "svg"]):
     if not f.exists():
         raise HTTPException(404, "planta unificada ainda não gerada (POST /solve)")
     return FileResponse(f)
+
+
+if VIEWER_DIR.exists():  # build do visualizador (web/ -> npm run build)
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/viewer", StaticFiles(directory=VIEWER_DIR, html=True), name="viewer")
