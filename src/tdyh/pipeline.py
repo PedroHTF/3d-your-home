@@ -8,6 +8,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
+
 from . import frames, ingest, planner
 from . import layout as layout_mod
 from .exporters import plan2d
@@ -51,7 +53,10 @@ def run(src: Path, project_dir: Path, recipe: str = "auto", progress: Progress =
         return report
 
     progress("sfm", 0.4, {})
-    sparse = colmap.run_sparse(images, project_dir / "colmap")
+    from . import lens
+    groups = lens.plan_cameras(media, images, lens.ProfileStore(lens_profiles_path()))
+    report["stages"]["cameras"] = lens.summarize(groups)
+    sparse = colmap.run_sparse(images, project_dir / "colmap", groups=groups)
     report["stages"]["sfm"] = {**asdict(sparse), "model_dir": str(sparse.model_dir),
                                "registration_ratio": sparse.registration_ratio}
     if sparse.registration_ratio < 0.6:
@@ -65,10 +70,16 @@ def run(src: Path, project_dir: Path, recipe: str = "auto", progress: Progress =
         report["stages"]["mvs"] = {k: str(v) for k, v in out.items()}
         progress("layout", 0.85, {})
         txt = colmap.export_txt(sparse.model_dir, project_dir / "colmap" / "sparse_txt")
-        report["stages"]["layout"] = make_plan(out["dense"], project_dir, scale, scale_source, colmap_txt=txt)
+        report["stages"]["layout"] = make_plan(out["dense"], project_dir, scale, scale_source, colmap_txt=txt,
+                                                     images_dir=images)
     progress("done", 1.0, {})
     _save(project_dir, report)
     return report
+
+
+def lens_profiles_path() -> Path:
+    import os
+    return Path(os.environ.get("TDYH_DATA", "data")) / "lenses.json"
 
 
 def _save(project_dir: Path, report: dict) -> None:
@@ -76,12 +87,15 @@ def _save(project_dir: Path, report: dict) -> None:
 
 
 def make_plan(dense_ply: Path, project_dir: Path, scale: float = 1.0, scale_source: str = "unknown",
-              up_hint=None, colmap_txt: Path | None = None) -> dict:
+              up_hint=None, colmap_txt: Path | None = None, images_dir: Path | None = None,
+              marker_points: dict[int, np.ndarray] | None = None) -> dict:
     """Nuvem densa -> grafo de cena medido -> (restrições) -> scene.json + DXF + SVG.
 
     Sem escala conhecida, estima uma escala APROXIMADA (pé-direito e portas típicos) para que os
     algoritmos funcionem; o usuário corrige depois com uma medida (mode="scale").
-    colmap_txt fornece as câmeras (necessárias para portas/janelas) e a vertical."""
+    colmap_txt fornece as câmeras (necessárias para portas/janelas) e a vertical. Com images_dir,
+    os marcadores ArUco vistos em 2+ imagens têm o centro guardado na cena (sistema da planta), para
+    juntar levantamentos automaticamente. marker_points: centros já triangulados (sistema do modelo)."""
     from . import scale as sc
     pts = read_ply_xyz(Path(dense_ply))
     cams = None
@@ -100,6 +114,11 @@ def make_plan(dense_ply: Path, project_dir: Path, scale: float = 1.0, scale_sour
         scale_source, unc = "prior", est.uncertainty
     res = layout_mod.build_layout(pts, scale=scale, up_hint=up_hint, cameras=cams)
     res.scene.scale_source, res.scene.scale_factor, res.scene.scale_uncertainty = scale_source, scale, unc
+    if marker_points is None and images_dir and colmap_txt:
+        marker_points = sc.marker_centers(sc.observe_markers(Path(images_dir), Path(colmap_txt)))
+    for mid, X in (marker_points or {}).items():
+        q = res.rotation @ (scale * np.asarray(X, float)) - np.array([0.0, 0.0, res.floor_offset])
+        res.scene.markers[str(mid)] = tuple(round(float(v), 5) for v in q)
     if scale_source == "prior":
         res.notes.append(f"Escala ESTIMADA por tamanhos típicos (±{unc:.0%}). Informe uma medida real "
                          "(ex.: comprimento de uma parede) para corrigir.")

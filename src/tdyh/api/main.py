@@ -58,6 +58,46 @@ def markers_pdf(n: int = 6, start: int = 0, side_cm: float = 15.0):
     return FileResponse(out, media_type="application/pdf", filename="marcadores.pdf")
 
 
+@app.get("/charuco.pdf")
+def charuco_pdf():
+    """PDF A4 do tabuleiro ChArUco (calibração de lentes)."""
+    from .. import charuco
+    out = DATA / "markers" / "charuco_7x10_25mm.pdf"
+    if not out.exists():
+        charuco.make_pdf(out)
+    return FileResponse(out, media_type="application/pdf", filename="tabuleiro_charuco.pdf")
+
+
+@app.get("/lenses")
+def list_lenses() -> list[dict]:
+    from ..lens import ProfileStore
+    return [p.model_dump() for p in ProfileStore(DATA / "lenses.json").load()]
+
+
+@app.delete("/lenses")
+def delete_lens(key: str) -> dict:
+    from ..lens import ProfileStore
+    if not ProfileStore(DATA / "lenses.json").delete(key):
+        raise HTTPException(404, "perfil não encontrado")
+    return {"deleted": key}
+
+
+@app.post("/lenses/calibrate", status_code=201)
+async def calibrate_lens(files: list[UploadFile], square_mm: float | None = None, fisheye: bool = False) -> dict:
+    """Fotos (ou um vídeo) do tabuleiro ChArUco tiradas com UMA lente -> perfil salvo."""
+    import tempfile
+
+    from ..cli import _calibrate
+    tmp = Path(tempfile.mkdtemp())
+    for f in files:
+        (tmp / Path(f.filename or "x.jpg").name).write_bytes(await f.read())
+    vids = [p for p in tmp.iterdir() if p.suffix.lower() in (".mp4", ".mov", ".m4v", ".mkv")]
+    try:
+        return _calibrate(vids[0] if vids else tmp, square_mm, fisheye, DATA / "lenses.json")
+    except (ValueError, SystemExit) as e:
+        raise HTTPException(422, str(e))
+
+
 @app.post("/projects", status_code=201)
 def create_project(body: ProjectIn) -> dict:
     pid = uuid.uuid4().hex[:12]
@@ -236,6 +276,9 @@ def edit_entity(pid: str, eid: str, params: dict) -> dict:
     sg = _load_measured(pid)
     if sg.get(eid) is None:
         raise HTTPException(404, "elemento não encontrado")
+    from ..constraints import LENGTH_PARAMS, mark_drawn
+    if LENGTH_PARAMS & params.keys() or f"override:{eid}" in sg.drawn_at_scale:
+        mark_drawn(sg, eid, override=True)  # valores em metros na escala ATUAL
     cur = sg.overrides.get(eid, {})
     for k, v in params.items():
         if v is None:
@@ -281,7 +324,9 @@ def create_entity(pid: str, body: NewElement) -> dict:
     if isinstance(e, Opening) and not isinstance(final.get(e.host_wall), Wall) and \
             not any(a.id == e.host_wall for a in sg.added):
         raise HTTPException(422, f"parede {e.host_wall} não existe")
+    from ..constraints import mark_drawn
     sg.added.append(e)
+    mark_drawn(sg, e.id)
     return {"created": e.id, "snapped": info, **_save_and_publish(pid, sg)}
 
 
@@ -540,6 +585,7 @@ def add_link(bid: str, body: dict) -> dict:
 @app.delete("/buildings/{bid}/links/{lid}")
 def delete_link(bid: str, lid: str) -> dict:
     b = _bload(bid)
+    b.ignored_auto += [lk.auto_key for lk in b.links if lk.id == lid and lk.auto_key]
     b.links = [lk for lk in b.links if lk.id != lid]
     _bsave(b)
     return b.model_dump()
@@ -550,12 +596,13 @@ def solve_building(bid: str) -> dict:
     """Ajuste global das posições + planta unificada (DXF/SVG)."""
     from dataclasses import asdict
 
-    from ..building import apply_poses, merge, solve_poses
+    from ..building import apply_poses, auto_marker_links, merge, solve_poses
     from ..exporters import plan2d
     b = _bload(bid)
     if not b.captures:
         raise HTTPException(409, "edificação sem levantamentos")
     scenes = _bscenes(b)
+    marker_info = auto_marker_links(b, scenes)
     res = solve_poses(b, scenes)
     apply_poses(b, res)
     _bsave(b)
@@ -570,7 +617,7 @@ def solve_building(bid: str) -> dict:
                            for n, s in scales.items() if s in ("prior", "unknown")]
     return {"poses": {c.id: c.pose.model_dump() for c in b.captures},
             "links": [asdict(s) for s in res.statuses], "ok": all(s.ok for s in res.statuses),
-            "shared_walls": info, "warnings": warn,
+            "shared_walls": info, "markers": marker_info, "warnings": warn,
             "rooms": [{"name": e.name, "area": e.area, "net_area": e.net_area}
                       for e in merged.entities if e.type == "space"]}
 

@@ -25,7 +25,9 @@ MEASURE_KINDS = {"length", "distance", "ceiling_height", "opening_width", "openi
                  "opening_sill", "opening_offset"}
 GEOM_KINDS = {"length", "distance", "parallel", "perpendicular", "angle", "orientation", "fixed"}
 OPENING_KINDS = {"opening_width", "opening_height", "opening_sill", "opening_offset"}
-WALL_EDITABLE = {"thickness", "height", "start", "end"}
+OPENING_PLACE_KINDS = {"opening_center", "opening_align"}
+LENGTH_PARAMS = {"start", "end", "offset", "width", "height", "sill"}  # acompanham a escala
+WALL_EDITABLE = {"thickness", "height", "start", "end", "alignment"}
 OPENING_EDITABLE = {"kind", "offset", "width", "height", "sill"}
 
 
@@ -134,7 +136,62 @@ def apply_scale(sg: SceneGraph, s: float) -> None:
         elif isinstance(e, Slab):
             e.polygon = [tuple(np.multiply(p, s)) for p in e.polygon]
             e.elevation *= s
+    sg.markers = {k: tuple(np.multiply(v, s)) for k, v in sg.markers.items()}
     sg.scale_factor *= s
+
+
+def current_scale(sg: SceneGraph) -> float:
+    """Fator de escala que `rebuild` aplicaria agora à cena medida (1.0 sem medidas de escala)."""
+    s, _, st = calibrate(sg)
+    return s if st else 1.0
+
+
+def _scale_entity(e, f: float) -> None:
+    if isinstance(e, (Wall, Separator)):
+        e.start, e.end = tuple(np.multiply(e.start, f)), tuple(np.multiply(e.end, f))
+        if isinstance(e, Wall):
+            e.height *= f
+    elif isinstance(e, Opening):
+        e.offset *= f; e.width *= f; e.height *= f; e.sill *= f
+    elif isinstance(e, Slab):
+        e.polygon = [tuple(np.multiply(p, f)) for p in e.polygon]
+        e.elevation *= f
+
+
+def mark_drawn(sg: SceneGraph, eid: str, override: bool = False) -> None:
+    """Registra a escala atual para um elemento criado (ou um ajuste) do usuário. Para ajustes,
+    os valores já guardados são antes convertidos para a escala atual (não misturar escalas)."""
+    s = current_scale(sg)
+    key = f"override:{eid}" if override else eid
+    r = sg.drawn_at_scale.get(key)
+    if override and r and eid in sg.overrides and abs(s / r - 1) > 1e-12:
+        f = s / r
+        p = sg.overrides[eid]
+        for k in LENGTH_PARAMS & p.keys():
+            p[k] = [x * f for x in p[k]] if isinstance(p[k], (list, tuple)) else p[k] * f
+    sg.drawn_at_scale[key] = s
+
+
+def rescale_user_work(sg: SceneGraph, s: float) -> list[str]:
+    """Elementos criados e ajustes do usuário foram desenhados numa escala anterior: acompanham a
+    mudança (fator s / escala_do_desenho). Sem registro da escala: ficam como estão."""
+    warn = []
+    for e in sg.added:
+        r = sg.drawn_at_scale.get(e.id)
+        if r and abs(s / r - 1) > 1e-9:
+            _scale_entity(e, s / r)
+    for eid, params in sg.overrides.items():
+        r = sg.drawn_at_scale.get(f"override:{eid}")
+        if not r or abs(s / r - 1) <= 1e-9:
+            continue
+        f = s / r
+        for k in LENGTH_PARAMS & params.keys():
+            v = params[k]
+            params[k] = [x * f for x in v] if isinstance(v, (list, tuple)) else v * f
+    changed = [k for k, r in sg.drawn_at_scale.items() if abs(s / r - 1) > 0.01]
+    if changed:
+        warn.append(f"{len(changed)} elemento(s)/ajuste(s) do usuário reescalados para a escala atual.")
+    return warn
 
 
 # ---------------------------------------------------------------- ajustes por elemento
@@ -303,6 +360,51 @@ def apply_opening_constraints(sg: SceneGraph) -> list[ConstraintStatus]:
     return st
 
 
+def _wall_frame(w: Wall):
+    a, b = np.array(w.start, float), np.array(w.end, float)
+    L = float(np.linalg.norm(b - a))
+    return a, (b - a) / L, L
+
+
+def apply_opening_placement(sg: SceneGraph) -> list[ConstraintStatus]:
+    """Centralizar na parede / alinhar o centro com outra abertura (projetado na parede hospedeira).
+    Vem depois das medidas de abertura, então usa a largura já corrigida."""
+    st = []
+    for c in sg.constraints:
+        if not c.enabled or c.kind not in OPENING_PLACE_KINDS:
+            continue
+        o = sg.get(c.refs[0]) if c.refs else None
+        w = sg.get(o.host_wall) if isinstance(o, Opening) else None
+        if not isinstance(w, Wall):
+            st.append(ConstraintStatus(c.id, c.kind, False, float("nan"), "Referência não é abertura."))
+            continue
+        a, d, L = _wall_frame(w)
+        if c.kind == "opening_center":
+            target = L / 2
+        else:
+            other = sg.get(c.refs[1]) if len(c.refs) > 1 else None
+            ow = sg.get(other.host_wall) if isinstance(other, Opening) else None
+            if not isinstance(ow, Wall) or other.id == o.id:
+                st.append(ConstraintStatus(c.id, c.kind, False, float("nan"), "Segunda referência não é outra abertura."))
+                continue
+            oa, od, _ = _wall_frame(ow)
+            if abs(d @ od) < 0.9:
+                st.append(ConstraintStatus(c.id, c.kind, False, float("nan"),
+                                           "Paredes não paralelas: alinhamento indeterminado."))
+                continue
+            if other.host_wall == o.host_wall:
+                st.append(ConstraintStatus(c.id, c.kind, False, float("nan"),
+                                           "As duas aberturas estão na mesma parede: alinhar não faz sentido."))
+                continue
+            target = float((oa + od * (other.offset + other.width / 2) - a) @ d)
+        before = o.offset + o.width / 2
+        o.offset = float(target - o.width / 2)
+        fits = o.offset >= -1e-6 and o.offset + o.width <= L + 1e-6
+        st.append(ConstraintStatus(c.id, c.kind, fits, round(abs(target - before), 4),
+                                   "" if fits else "Abertura não cabe na parede nessa posição."))
+    return st
+
+
 def ceiling_constraint(sg: SceneGraph) -> list[ConstraintStatus]:
     st = []
     for c in sg.constraints:
@@ -400,8 +502,11 @@ def split_wall(measured: SceneGraph, final: SceneGraph, wid: str, at: float) -> 
     if not 0.05 < at < L - 0.05:
         raise ValueError(f"posição deve ficar entre 0,05 e {L - 0.05:.2f} m")
     m = a + (b - a) * at / L
-    w1 = Wall(start=tuple(a), end=tuple(m), thickness=w.thickness, height=w.height, source="user")
-    w2 = Wall(start=tuple(m), end=tuple(b), thickness=w.thickness, height=w.height, source="user")
+    from .exporters.plan2d import is_axis
+    al = "center" if is_axis(w, final) else "face"  # as metades mantêm o lado da espessura
+    w1 = Wall(start=tuple(a), end=tuple(m), thickness=w.thickness, height=w.height, source="user", alignment=al)
+    w2 = Wall(start=tuple(m), end=tuple(b), thickness=w.thickness, height=w.height, source="user", alignment=al)
+    n_before = len(measured.added)
     measured.added += [w1, w2]
     for o in [e for e in final.entities if isinstance(e, Opening) and e.host_wall == wid]:
         if o.offset + o.width <= at:
@@ -413,6 +518,8 @@ def split_wall(measured: SceneGraph, final: SceneGraph, wid: str, at: float) -> 
         new.id = o.id + "s"
         measured.added.append(new)
     measured.deleted.append(wid)
+    for e in measured.added[n_before:]:
+        mark_drawn(measured, e.id)
     # restrições da parede original passam para as metades
     from .scenegraph import Constraint
     angular = {"parallel", "perpendicular", "angle", "orientation", "fixed"}
@@ -451,11 +558,13 @@ def rebuild(measured: SceneGraph) -> tuple[SceneGraph, SolveReport]:
             rep.warnings.append(f"Escala corrigida em {s - 1:+.0%}: recomendável refazer a detecção "
                                 "(POST /plan) para que portas e janelas usem limites na escala certa.")
     rep.statuses += st
+    rep.warnings += rescale_user_work(sg, s if st else 1.0)
     rep.warnings += apply_structure(sg)
     rep.warnings += apply_overrides(sg)
     rep.statuses += ceiling_constraint(sg)
     rep.statuses += solve_geometry(sg)
     rep.statuses += apply_opening_constraints(sg)
+    rep.statuses += apply_opening_placement(sg)
     rep.warnings += validate_openings(sg)
     if sg.rooms_enabled:
         from .rooms import build_spaces

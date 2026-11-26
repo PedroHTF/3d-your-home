@@ -126,6 +126,22 @@ def camera_up_hint(poses: dict[str, dict]) -> np.ndarray:
 
 
 def scale_from_images(images_dir: Path, model_dir: Path, marker_size_m: float) -> ScaleEstimate:
+    return from_markers(observe_markers(images_dir, model_dir), marker_size_m)
+
+
+def marker_centers(observations: dict[int, list[tuple[np.ndarray, np.ndarray]]]) -> dict[int, np.ndarray]:
+    """Centro 3D (sistema do modelo) de cada marcador visto em >= 2 imagens (média dos 4 cantos)."""
+    out = {}
+    for mid, obs in observations.items():
+        if len(obs) < 2:
+            continue
+        Ps = [o[0] for o in obs]
+        X = np.array([triangulate(Ps, [o[1][k] for o in obs]) for k in range(4)])
+        out[int(mid)] = X.mean(axis=0)
+    return out
+
+
+def observe_markers(images_dir: Path, model_dir: Path) -> dict[int, list]:
     poses = read_colmap_text(model_dir)
     obs: dict[int, list] = {}
     for name, pose in poses.items():
@@ -134,7 +150,7 @@ def scale_from_images(images_dir: Path, model_dir: Path, marker_size_m: float) -
             continue
         for mid, corners in detect_markers(img).items():
             obs.setdefault(mid, []).append((pose["P"], corners))
-    return from_markers(obs, marker_size_m)
+    return obs
 
 
 # ---------- escala aproximada por tamanhos típicos (sem marcador) ----------

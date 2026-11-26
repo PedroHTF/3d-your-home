@@ -33,6 +33,10 @@ class Wall(Entity):
     thickness: float = 0.15
     height: float = 2.7
     shared_with: str | None = None  # mesma parede física vista de outro levantamento
+    # "face": a linha é uma face e a espessura vai para fora do cômodo (parede medida);
+    # "center": a linha é o eixo e a espessura fica metade para cada lado (divisória desenhada);
+    # "auto": eixo se foi desenhada pelo usuário e não está no contorno do piso; senão face.
+    alignment: Literal["face", "center", "auto"] = "auto"
 
 
 class Separator(Entity):
@@ -132,6 +136,8 @@ ConstraintKind = Literal[
     "distance",        # refs=[parede_a, parede_b] paralelas; value=m (face a face)
     "ceiling_height",  # refs=[]; value=m
     "opening_width", "opening_height", "opening_sill", "opening_offset",  # refs=[abertura]; value=m
+    "opening_center",  # refs=[abertura]; centraliza na parede hospedeira
+    "opening_align",   # refs=[abertura, outra]; alinha o centro com o da outra (projetado na parede)
     # geometria (sempre locais)
     "parallel",        # refs=[a, b]
     "perpendicular",   # refs=[a, b]
@@ -168,6 +174,11 @@ class SceneGraph(BaseModel):
     deleted: list[str] = Field(default_factory=list)          # ids removidos (reversível)
     rooms_enabled: bool = False                                # divisão em cômodos (opcional)
     room_labels: list[RoomLabel] = Field(default_factory=list)
+    # escala do modelo no momento em que cada elemento criado/ajustado pelo usuário foi desenhado;
+    # se a escala mudar depois, o elemento acompanha (fator escala_atual / escala_do_desenho)
+    drawn_at_scale: dict[str, float] = Field(default_factory=dict)
+    # centros dos marcadores ArUco detectados, no sistema da planta (m): {"7": (x, y, z)}
+    markers: dict[str, tuple[float, float, float]] = Field(default_factory=dict)
 
     def get(self, eid: str) -> AnyEntity | None:
         return next((e for e in self.entities if e.id == eid), None) or \

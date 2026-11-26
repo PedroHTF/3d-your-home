@@ -43,6 +43,7 @@ def run_sparse(
     single_camera: bool = True,
     gpu: bool = True,
     matcher: str = "sequential",  # "sequential" p/ vídeo, "exhaustive" p/ fotos soltas
+    groups: list | None = None,   # lens.CameraGroup: uma câmera por lente/resolução
 ) -> SparseResult:
     if not available():
         raise RuntimeError("colmap não encontrado no PATH")
@@ -50,22 +51,51 @@ def run_sparse(
     db, sparse, log = work / "database.db", work / "sparse", work / "colmap.log"
     sparse.mkdir(exist_ok=True)
     g = "1" if gpu else "0"
-    _run(["colmap", "feature_extractor", "--database_path", str(db), "--image_path", str(images),
-          "--ImageReader.camera_model", camera_model,
-          "--ImageReader.single_camera", "1" if single_camera else "0",
-          "--SiftExtraction.use_gpu", g], log)
+    for cmd in extractor_commands(db, images, groups, camera_model, single_camera, g, work):
+        _run(cmd, log)
     _run(["colmap", f"{matcher}_matcher", "--database_path", str(db),
           "--SiftMatching.use_gpu", g], log)
+    fix = mapper_fix_flags(groups)
     if shutil.which("glomap"):
         _run(["glomap", "mapper", "--database_path", str(db), "--image_path", str(images),
-              "--output_path", str(sparse)], log)
+              "--output_path", str(sparse)] + fix["glomap"], log)
     else:
         _run(["colmap", "mapper", "--database_path", str(db), "--image_path", str(images),
-              "--output_path", str(sparse)], log)
+              "--output_path", str(sparse)] + fix["colmap"], log)
     model = _largest_model(sparse)
     stats = _run(["colmap", "model_analyzer", "--path", str(model)], log)
     total = len([p for p in images.iterdir() if p.suffix.lower() in (".jpg", ".jpeg", ".png")])
     return parse_analyzer(stats, model, total)
+
+
+def extractor_commands(db: Path, images: Path, groups: list | None, camera_model: str = "OPENCV",
+                       single_camera: bool = True, gpu: str = "1", work: Path | None = None) -> list[list[str]]:
+    """Um feature_extractor por grupo de lente (cada execução com single_camera cria UMA câmera)."""
+    base = ["colmap", "feature_extractor", "--database_path", str(db), "--image_path", str(images),
+            "--SiftExtraction.use_gpu", gpu]
+    if not groups:
+        return [base + ["--ImageReader.camera_model", camera_model,
+                        "--ImageReader.single_camera", "1" if single_camera else "0"]]
+    cmds = []
+    for k, g in enumerate(groups):
+        lst = Path(work or db.parent) / f"images_cam{k}.txt"
+        lst.write_text("\n".join(g.images) + "\n")
+        cmd = base + ["--image_list_path", str(lst), "--ImageReader.camera_model", g.camera_model,
+                      "--ImageReader.single_camera", "1"]
+        if g.params:
+            cmd += ["--ImageReader.camera_params", ",".join(f"{v:.10g}" for v in g.params)]
+        cmds.append(cmd)
+    return cmds
+
+
+def mapper_fix_flags(groups: list | None) -> dict[str, list[str]]:
+    """Com todas as lentes calibradas, não refina os intrínsecos (as flags são globais no mapper:
+    com lentes calibradas e não calibradas misturadas, todas são refinadas)."""
+    if groups and all(g.fixed for g in groups):
+        return {"colmap": ["--Mapper.ba_refine_focal_length", "0", "--Mapper.ba_refine_principal_point", "0",
+                           "--Mapper.ba_refine_extra_params", "0"],
+                "glomap": ["--BundleAdjustment.optimize_intrinsics", "0"]}
+    return {"colmap": [], "glomap": []}
 
 
 def _largest_model(sparse: Path) -> Path:

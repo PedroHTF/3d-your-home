@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from ..scenegraph import Opening, SceneGraph, Slab, Space, Wall
-from .plan2d import _center, _l_corner, _outward
+from .plan2d import _center, _l_corner, _outward, axis_flags
 
 SOURCE_PT = {"auto": "medida", "inferred": "inferida", "user": "usuário"}
 
@@ -75,13 +75,13 @@ def _matrix(origin2d, d2d, z: float = 0.0) -> np.ndarray:
     return m
 
 
-def _is_internal(w: Wall, outward: np.ndarray, spaces: list[Space]) -> bool | None:
+def _is_internal(w: Wall, outward: np.ndarray, spaces: list[Space], far: float) -> bool | None:
     """Externa se do outro lado da espessura não há cômodo. Sem cômodos: indeterminado (None)."""
     if not spaces:
         return None
     from ..rooms import _inside
     mid = (np.array(w.start) + np.array(w.end)) / 2
-    q = mid + outward * (w.thickness + 0.05)
+    q = mid + outward * (far + 0.05)
     return any(_inside(q, s.polygon) for s in spaces)
 
 
@@ -186,6 +186,7 @@ def to_ifc(sg: SceneGraph, path: Path, project_name: str = "3D Your Home",
 
     # ---- paredes
     ifc_walls, wall_frame = {}, {}
+    ax = axis_flags(sg)
     for w in kept:
         a, b = np.array(w.start, float), np.array(w.end, float)
         L = float(np.linalg.norm(b - a))
@@ -195,11 +196,12 @@ def to_ifc(sg: SceneGraph, path: Path, project_name: str = "3D Your Home",
         out = _outward(w, _wall_center(sg, w, floors))
         s = 1.0 if out @ np.array([-d[1], d[0]]) > 0 else -1.0
         e0, e1 = _l_corner(w, "start", all_walls), _l_corner(w, "end", all_walls)
-        prof = [(-e0, 0.0), (L + e1, 0.0), (L + e1, s * w.thickness), (-e0, s * w.thickness)]
+        lo, hi = (-w.thickness / 2, w.thickness / 2) if ax[w.id] else (0.0, w.thickness)
+        prof = [(-e0, s * lo), (L + e1, s * lo), (L + e1, s * hi), (-e0, s * hi)]
         M = _matrix(a, d)
         name = f"Parede {w.id}"
         ifc = w_.product("IfcWall", name, M, w_.extrusion(prof, w.height), predefined_type="STANDARD")
-        internal = _is_internal(w, out, spaces) or bool(w.shared_with) or any(o.shared_with == w.id for o in all_walls)
+        internal = _is_internal(w, out, spaces, hi) or bool(w.shared_with) or any(o.shared_with == w.id for o in all_walls)
         if not spaces and not internal:
             internal = None
         shared = [o.id for o in all_walls if o.shared_with == w.id]
@@ -208,10 +210,11 @@ def to_ifc(sg: SceneGraph, path: Path, project_name: str = "3D Your Home",
                                                 "GrossSideArea": L * w.height})
         w_.pset(ifc, "TDYH_Parametros", {"Inicio": f"{a[0]:.4f}, {a[1]:.4f}", "Fim": f"{b[0]:.4f}, {b[1]:.4f}",
                                          "Comprimento": L, "Espessura": float(w.thickness), "Altura": float(w.height),
-                                         "LadoEspessura": "esquerda" if s > 0 else "direita",
+                                         "LadoEspessura": "centralizada" if ax[w.id] else
+                                         ("esquerda" if s > 0 else "direita"),
                                          "CompartilhadaCom": ", ".join(shared) or None})
         w_.origin(ifc, w, sg)
-        ifc_walls[w.id], wall_frame[w.id] = ifc, (M, s, L)
+        ifc_walls[w.id], wall_frame[w.id] = ifc, (M, s, L, lo, hi)
     w_.contain(list(ifc_walls.values()))
 
     # ---- aberturas
@@ -228,7 +231,7 @@ def to_ifc(sg: SceneGraph, path: Path, project_name: str = "3D Your Home",
             host = by_id[o.host_wall]
         if host.id not in ifc_walls:
             continue
-        M, s, L = wall_frame[host.id]
+        M, s, L, lo, hi = wall_frame[host.id]
         x0, x1 = max(0.0, o.offset), min(L, o.offset + o.width)
         top = min(o.sill + o.height, host.height)
         if x1 - x0 < 1e-3 or top - o.sill < 1e-3:
@@ -236,15 +239,14 @@ def to_ifc(sg: SceneGraph, path: Path, project_name: str = "3D Your Home",
             continue
         if x0 != o.offset or x1 != o.offset + o.width or top != o.sill + o.height:
             warn.append(f"Abertura {o.id} excede a parede {host.id}; recortada no IFC.")
-        t = host.thickness
-        y0, y1 = sorted((-0.02 * s, s * (t + 0.02)))
+        y0, y1 = sorted((s * (lo - 0.02), s * (hi + 0.02)))
         void = w_.product("IfcOpeningElement", f"Vão {o.id}", M,
                           w_.extrusion([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], top - o.sill, o.sill),
                           predefined_type="OPENING")
         api.feature.add_feature(f, feature=void, element=ifc_walls[host.id])
         is_door = o.kind.value == "door"
         pw = 0.04 if is_door else 0.02
-        yc = s * t / 2
+        yc = s * (lo + hi) / 2
         panel = [(x0, yc - pw / 2), (x1, yc - pw / 2), (x1, yc + pw / 2), (x0, yc + pw / 2)]
         cls = "IfcDoor" if is_door else "IfcWindow"
         fill = w_.product(cls, f"{'Porta' if is_door else 'Janela'} {o.id}", M,

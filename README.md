@@ -63,6 +63,8 @@ medida → escala → ajustes por elemento → restrições. Apagar/desativar al
 | Paralelismo / perpendicularidade | `{"kind":"parallel"\|"perpendicular","refs":["<a>","<b>"]}` |
 | Ângulo entre paredes / orientação | `{"kind":"angle","refs":[a,b],"value":120}` · `{"kind":"orientation","refs":[a],"value":0}` |
 | Travar uma parede | `{"kind":"fixed","refs":["<a>"]}` |
+| Centralizar abertura na parede | `{"kind":"opening_center","refs":["<abertura>"]}` |
+| Alinhar abertura com outra (paredes paralelas) | `{"kind":"opening_align","refs":["<abertura>","<outra>"]}` (centro com centro) |
 | Editar / desativar / apagar restrição | `PATCH` / `DELETE .../scene/constraints/{cid}` |
 | Criar parede / porta / janela / objeto | `POST .../scene/entities` `{"element":{"type":"wall","start":[x,y],"end":[x,y]}}` (encaixa em cantos e paredes a 10 cm) |
 | Remover elemento (aberturas da parede saem junto) | `DELETE .../scene/entities/{eid}` — detectados: reversível com `POST .../{eid}/restore` |
@@ -74,6 +76,11 @@ medida → escala → ajustes por elemento → restrições. Apagar/desativar al
 
 Cada resposta informa se cada restrição foi satisfeita e aponta conflitos e medidas incoerentes.
 
+Elementos criados e ajustes feitos pelo usuário guardam a escala em que foram desenhados: se a
+escala mudar depois (nova medida), eles acompanham. Paredes desenhadas pelo usuário fora do contorno
+(divisórias) têm a espessura **centralizada** na linha; as medidas continuam com a face na linha e
+espessura para fora. Para forçar: `PATCH`/criação com `"alignment":"face"|"center"`.
+
 ### Juntar cômodos de levantamentos diferentes
 
 Cada levantamento é um projeto com planta própria (já em metros). Uma *edificação* reúne vários:
@@ -84,6 +91,9 @@ Cada levantamento é um projeto com planta própria (já em metros). Uma *edific
 3. Confirme criando ligações: `POST /buildings/{id}/links` —
    `door_match` (mesma porta), `wall_contact` (parede encostada), `collinear` (paredes na mesma linha,
    ex.: fachada), `point_match` (mesmo ponto físico, ex.: canto ou marcador compartilhado).
+   **Marcadores ArUco** com o mesmo ID vistos em dois levantamentos (ex.: colado no batente da porta)
+   viram ligações `point_match` automáticas no `solve`; dois marcadores bastam para posicionar sem
+   nenhuma ligação manual. Apagar uma ligação automática fica lembrado.
    Posição manual: `PUT /buildings/{id}/captures/{cid}/pose`.
 4. `POST /buildings/{id}/solve` — ajuste global de todas as posições (em ciclos o erro é repartido),
    junção das paredes compartilhadas (espessura medida) e planta unificada em `GET /buildings/{id}/plan/{dxf|svg}`.
@@ -115,14 +125,29 @@ tdyh markers quarto.pdf -n 4 --start 10     # outro cômodo: IDs 10–13
 ```
 Também disponível em `GET /markers.pdf?n=6&side_cm=15`. Use um ID diferente em cada parede.
 
+### Lentes e calibração (ChArUco)
+
+Cada lente do celular (0,6x, 1x, 3x) é uma câmera diferente. O pipeline agrupa as imagens por lente
+e resolução (EXIF; frames herdam o vídeo) e escolhe o modelo do COLMAP pelo campo de visão:
+`RADIAL` (normal/tele), `OPENCV` (grande-angular e ultra-wide), `OPENCV_FISHEYE` (> 130°). A focal
+inicial vem do EXIF; a distorção é autocalibrada. Para mais precisão, calibre cada lente uma vez:
+
+```bash
+tdyh charuco tabuleiro.pdf                 # A4: xadrez 7x10 de 25 mm com marcadores ArUco 5x5
+tdyh calibrate fotos_0.6x/ --square-mm 24.8   # 15–30 fotos do tabuleiro com UMA lente (ou um vídeo)
+tdyh lenses                                # perfis salvos · `tdyh lenses pasta/` mostra os grupos
+```
+API: `GET /charuco.pdf`, `POST /lenses/calibrate`, `GET /lenses`, `DELETE /lenses?key=...`.
+Com perfil, os parâmetros entram fixos no COLMAP (se todas as lentes da captura forem calibradas,
+os intrínsecos não são refinados). Use fotos ORIGINAIS: apps de mensagem e uploads removem o EXIF.
+
 ### Dicas de captura
 - Movimento lento, ~70% de sobreposição entre quadros, luz uniforme.
 - Para escala métrica, inclua um objeto de medida conhecida (ou um marcador ArUco impresso).
 
 ## Licenças
 
-Código deste repositório: **AGPL-3.0-or-later** (adicione o texto completo em `LICENSE` pelo GitHub:
-*Add file → Create new file → LICENSE → Choose a license template*).
+Código deste repositório: **AGPL-3.0-or-later** (texto completo em `LICENSE`).
 
 Dependências externas, instaladas à parte e **não** incluídas aqui:
 - OpenMVS, Ultralytics YOLO — AGPL-3.0.
