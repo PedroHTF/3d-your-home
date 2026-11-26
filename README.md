@@ -125,6 +125,21 @@ tdyh markers quarto.pdf -n 4 --start 10     # outro cômodo: IDs 10–13
 ```
 Também disponível em `GET /markers.pdf?n=6&side_cm=15`. Use um ID diferente em cada parede.
 
+### Visualizador 3D
+
+Com a API rodando (`uvicorn tdyh.api.main:app`), abra **http://localhost:8000/viewer/**. Funciona no
+navegador do computador e do celular.
+
+- Escolha um levantamento ou uma edificação; vistas **3D** e **Planta** (corte a 1,20 m).
+- **Camadas:** paredes, portas, janelas, piso, teto, cômodos, nuvem de pontos, marcadores; corte em altura.
+- **Clique/toque num elemento:** medidas e origem (medida / inferida / usuário, confiança).
+  Inferidos em laranja, desenhados pelo usuário em azul.
+- Links diretos: `/viewer/?project=<id>&vista=planta&sel=<id-do-elemento>` (ou `?building=<id>`).
+- Dados de demonstração: `TDYH_DATA=data python scripts/demo_data.py`.
+
+A página já vem compilada em `src/tdyh/viewer_dist`. Para mexer no código (`web/`, Three.js +
+TypeScript): `cd web && npm install && npm run dev` (desenvolvimento) ou `npm run build`.
+
 ### Lentes e calibração (ChArUco)
 
 Cada lente do celular (0,6x, 1x, 3x) é uma câmera diferente. O pipeline agrupa as imagens por lente

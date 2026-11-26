@@ -6,3 +6,4 @@ data/
 *.ply
 *.mvs
 *.db
+web/node_modules/
